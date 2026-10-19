@@ -7,8 +7,8 @@ release (highest wrist point while airborne).
 Put videos in data/. Results go to out/<video name>/.
 
 Usage:
-    python jumpshot_trimmer.py IMG_1234.MOV
-    python jumpshot_trimmer.py IMG_1234.MOV -o highlights.mp4 --dry-run
+    python jumpshot_trimmer.py detect IMG_1234.MOV    # pass 1: numbered review video
+    python jumpshot_trimmer.py trim IMG_1234 3,7      # pass 2: final video without clips 3 and 7
 """
 
 import argparse
@@ -226,16 +226,18 @@ def detect_shots(times, sig, fps, args):
     return shots, near
 
 
-def clip_windows(shots, duration, pre, post):
-    """Pad each shot and merge any windows that overlap."""
+def clip_windows(cands, duration, pre, post):
+    """Pad each candidate and merge any windows that overlap. A merged clip is a maybe
+    only if everything in it is."""
     out = []
-    for sh in shots:
-        start, end = max(0.0, sh["gather"] - pre), min(duration, sh["release"] + post)
-        if out and start <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], end)
+    for c in sorted(cands, key=lambda c: c["gather"]):
+        start, end = max(0.0, c["gather"] - pre), min(duration, c["release"] + post)
+        if out and start <= out[-1]["end"]:
+            out[-1]["end"] = max(out[-1]["end"], end)
+            out[-1]["maybe"] = out[-1]["maybe"] and c["maybe"]
         else:
-            out.append([start, end])
-    return [(round(a, 3), round(b, 3)) for a, b in out]
+            out.append({"start": start, "end": end, "maybe": c["maybe"]})
+    return [{**w, "start": round(w["start"], 3), "end": round(w["end"], 3)} for w in out]
 
 
 # ---------------------------------------------------------------- export
@@ -248,97 +250,172 @@ def probe(video):
     return float(info["format"]["duration"]), has_audio
 
 
-def export(video, windows, out, has_audio):
-    expr = "+".join(f"between(t,{a},{b})" for a, b in windows)
+def fmt_time(sec, ms=False):
+    m, s = divmod(sec, 60)
+    if ms:
+        h, m = divmod(int(m), 60)
+        return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+    return f"{int(m)}:{int(s):02d}"
+
+
+def timeline(clips):
+    """Where each clip lands in the combined video."""
+    out, reel = [], 0.0
+    for c in clips:
+        d = c["end"] - c["start"]
+        out.append({**c, "reel_start": round(reel, 3), "reel_end": round(reel + d, 3)})
+        reel += d
+    return out
+
+
+def label(c):
+    return f"Clip {c['n']}{' (maybe)' if c['maybe'] else ''} · {fmt_time(c['start'])} in original"
+
+
+def write_clip_labels(clips, srt_path, chapters_path):
+    """Subtitle + chapter files that label each clip in the combined video."""
+    srt, chap = [], [";FFMETADATA1"]
+    for i, c in enumerate(clips, 1):
+        srt += [str(i), f"{fmt_time(c['reel_start'], True)} --> {fmt_time(c['reel_end'], True)}", label(c), ""]
+        chap += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={int(c['reel_start'] * 1000)}",
+                 f"END={int(c['reel_end'] * 1000)}", f"title={label(c)}"]
+    srt_path.write_text("\n".join(srt))
+    chapters_path.write_text("\n".join(chap) + "\n")
+
+
+def export(video, clips, out):
+    """Join the clips into one video, with clip labels as subtitles and chapters."""
+    _, has_audio = probe(video)
+    expr = "+".join(f"between(t,{c['start']},{c['end']})" for c in clips)
+    srt, chapters = out.with_suffix(".srt"), out.with_suffix(".chapters.txt")
+    write_clip_labels(clips, srt, chapters)
     filters = f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB,format=yuv420p[v]"
     maps = ["-map", "[v]"]
     if has_audio:
         filters += f";[0:a]aselect='{expr}',asetpts=N/SR/TB[a]"
         maps += ["-map", "[a]"]
-    cmd = ["ffmpeg", "-y", "-v", "error", "-stats", "-i", str(video),
-           "-filter_complex", filters, *maps,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-           "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-stats", "-i", str(video), "-i", str(chapters), "-i", str(srt),
+           "-filter_complex", filters, *maps, "-map", "2:s", "-map_chapters", "1",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k",
+           "-c:s", "mov_text", "-metadata:s:s:0", "language=eng",
+           "-disposition:s:0", "default",
+           "-movflags", "+faststart", str(out)]
     subprocess.run(cmd, check=True)
 
 
-def export_separate(video, windows, out_dir):
-    """One small file per window, named by its start time in the source video."""
-    out_dir.mkdir(exist_ok=True)
-    for old in out_dir.glob("maybe_*.mp4"):
-        old.unlink()
-    for a, b in windows:
-        m, sec = divmod(int(a), 60)
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(a), "-to", str(b), "-i", str(video),
-                        "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                        "-c:a", "aac", str(out_dir / f"maybe_{m:02d}m{sec:02d}s.mp4")], check=True)
+def print_clips(clips):
+    print("  clip  in video  in original")
+    for c in clips:
+        print(f"  {c['n']:>4}  {fmt_time(c['reel_start']):>8}  {fmt_time(c['start']):>11}"
+              f"{'  maybe' if c['maybe'] else ''}")
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- commands
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("video", type=Path)
-    p.add_argument("-o", "--output", type=Path, help="default: out/<video>/<video>_jumpshots.mp4")
-    p.add_argument("--pre", type=float, default=0.5, help="seconds before gather (default 0.5)")
-    p.add_argument("--post", type=float, default=0.5, help="seconds after release (default 0.5)")
-    p.add_argument("--model", default="yolo11s-pose.pt", help="ultralytics pose model")
-    p.add_argument("--device", default=None, help="mps, cpu, cuda (default: mps if available)")
-    p.add_argument("--analysis-fps", type=float, default=30, help="frames/sec to run pose on")
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--arm-up", type=float, default=0.4,
-                   help="wrist height above shoulders (torso lengths) counted as arms up")
-    p.add_argument("--arm-peak", type=float, default=0.55,
-                   help="min wrist height above shoulders at release (torso lengths)")
-    p.add_argument("--jump", type=float, default=0.1,
-                   help="min hip rise during the shot (torso lengths)")
-    p.add_argument("--dry-run", action="store_true", help="detect and write JSON, skip export")
-    p.add_argument("--no-maybe", action="store_true", help="skip exporting near-miss clips")
-    p.add_argument("--fresh", action="store_true", help="ignore cached pose and re-run detection")
-    p.add_argument("--debug", action="store_true", help="also write per-frame signals CSV")
-    args = p.parse_args()
+def find_video(path):
+    if not path.exists() and (DATA_DIR / path).exists():
+        path = DATA_DIR / path
+    if not path.exists():
+        sys.exit(f"No such file: {path} (put videos in {DATA_DIR})")
+    return path.resolve()
 
-    if not args.video.exists() and (DATA_DIR / args.video).exists():
-        args.video = DATA_DIR / args.video
-    if not args.video.exists():
-        sys.exit(f"No such file: {args.video}")
-    if not shutil.which("ffmpeg"):
-        sys.exit("ffmpeg not found (brew install ffmpeg)")
+
+def parse_clip_numbers(s):
+    """'3,7,10-12' -> {3, 7, 10, 11, 12}"""
+    nums = set()
+    for part in filter(None, (p.strip() for p in s.split(","))):
+        lo, _, hi = part.partition("-")
+        nums.update(range(int(lo), int(hi or lo) + 1))
+    return nums
+
+
+def cmd_detect(args):
+    video = find_video(args.video)
     if args.device is None:
         import torch
         args.device = "mps" if torch.backends.mps.is_available() else "cpu"
-    out = args.output or OUT_DIR / args.video.stem / f"{args.video.stem}_jumpshots.mp4"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = OUT_DIR / video.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    duration, has_audio = probe(args.video)
-    print(f"Analyzing {args.video.name} ({duration:.0f}s) on {args.device}...")
-    times, kps, fps = load_or_extract_pose(args, out.parent / "pose.npz")
+    duration, _ = probe(video)
+    print(f"Analyzing {video.name} ({duration:.0f}s) on {args.device}...")
+    args.video = video
+    times, kps, fps = load_or_extract_pose(args, out_dir / "pose.npz")
     sig = compute_signals(kps, fps)
     shots, near = detect_shots(times, sig, fps, args)
-    windows = clip_windows(shots, duration, args.pre, args.post)
-    near_windows = clip_windows(near, duration, args.pre, args.post)
+    cands = [{**c, "maybe": False} for c in shots] + [{**c, "maybe": True} for c in near]
+    clips = [{"n": n, **w} for n, w in enumerate(clip_windows(cands, duration, args.pre, args.post), 1)]
 
-    json_path = out.with_suffix(".json")
-    json_path.write_text(json.dumps({"video": str(args.video), "shots": shots, "clips": windows,
-                                     "near_misses": near}, indent=2))
+    (out_dir / "clips.json").write_text(json.dumps(
+        {"video": str(video), "clips": clips, "shots": shots, "near_misses": near}, indent=2))
     if args.debug:
         cols = ["shoulder_y", "hip_y", "wrist_y", "torso", "arm"]
-        data = np.column_stack([times] + [sig[c] for c in cols])
-        np.savetxt(out.with_suffix(".signals.csv"), data, delimiter=",", fmt="%.4f",
-                   header="t," + ",".join(cols), comments="")
+        np.savetxt(out_dir / "signals.csv", np.column_stack([times] + [sig[c] for c in cols]),
+                   delimiter=",", fmt="%.4f", header="t," + ",".join(cols), comments="")
 
-    print(f"Found {len(shots)} jumpshots -> {len(windows)} clips "
-          f"({sum(b - a for a, b in windows):.1f}s), plus {len(near)} near misses. "
-          f"Times saved to {json_path}")
-    if args.dry_run:
+    clips = timeline(clips)
+    print(f"Found {len(shots)} shots + {len(near)} maybes -> {len(clips)} clips.")
+    print_clips(clips)
+    if args.dry_run or not clips:
         return
-    if windows:
-        export(args.video, windows, out, has_audio)
-        print(f"Exported {out}")
-    if near_windows and not args.no_maybe:
-        maybe_dir = out.with_name("maybe")
-        export_separate(args.video, near_windows, maybe_dir)
-        print(f"Near misses in {maybe_dir}/ (named by time in the original video)")
+    review = out_dir / f"{video.stem}_review.mp4"
+    export(video, clips, review)
+    print(f"\nExported {review}\nWatch it, then drop clips with:\n"
+          f"  python jumpshot_trimmer.py trim {video.stem} <clip numbers, e.g. 3,7,10-12>")
+
+
+def cmd_trim(args):
+    stem = Path(args.name).stem
+    clips_path = OUT_DIR / stem / "clips.json"
+    if not clips_path.exists():
+        sys.exit(f"No {clips_path}. Run detect first.")
+    data = json.loads(clips_path.read_text())
+    clips = data["clips"]
+    bad = sorted(n for n in args.drop if not 1 <= n <= len(clips))
+    if bad:
+        sys.exit(f"No clip {bad} (clips are 1-{len(clips)})")
+    kept = timeline([c for c in clips if c["n"] not in args.drop])
+    if not kept:
+        sys.exit("That drops every clip.")
+    print(f"Dropping {len(args.drop)} of {len(clips)} clips -> {len(kept)} clips "
+          f"({kept[-1]['reel_end']:.1f}s).")
+    final = OUT_DIR / stem / f"{stem}_final.mp4"
+    export(Path(data["video"]), kept, final)
+    print(f"Exported {final}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    d = sub.add_parser("detect", help="pass 1: find shots and export a numbered review video")
+    d.add_argument("video", type=Path, help="video file, or just its name if it's in data/")
+    d.add_argument("--pre", type=float, default=0.5, help="seconds before gather (default 0.5)")
+    d.add_argument("--post", type=float, default=0.5, help="seconds after release (default 0.5)")
+    d.add_argument("--arm-up", type=float, default=0.4,
+                   help="wrist height above shoulders (torso lengths) counted as arms up")
+    d.add_argument("--arm-peak", type=float, default=0.55,
+                   help="min wrist height above shoulders at release (torso lengths)")
+    d.add_argument("--jump", type=float, default=0.1, help="min hip rise during the shot (torso lengths)")
+    d.add_argument("--model", default="yolo11s-pose.pt", help="ultralytics pose model")
+    d.add_argument("--device", default=None, help="mps, cpu, cuda (default: mps if available)")
+    d.add_argument("--analysis-fps", type=float, default=30, help="frames/sec to run pose on")
+    d.add_argument("--batch", type=int, default=16)
+    d.add_argument("--fresh", action="store_true", help="ignore cached pose and re-run it")
+    d.add_argument("--dry-run", action="store_true", help="list clips, skip the video export")
+    d.add_argument("--debug", action="store_true", help="also write per-frame signals CSV")
+    d.set_defaults(func=cmd_detect)
+
+    t = sub.add_parser("trim", help="pass 2: export a final video without the clips you drop")
+    t.add_argument("name", help="video name, e.g. IMG_0121")
+    t.add_argument("drop", type=parse_clip_numbers, metavar="CLIPS",
+                   help="clip numbers from the review video to drop, e.g. 3,7,10-12")
+    t.set_defaults(func=cmd_trim)
+
+    args = p.parse_args()
+    if not shutil.which("ffmpeg"):
+        sys.exit("ffmpeg not found (brew install ffmpeg)")
+    args.func(args)
 
 
 if __name__ == "__main__":
