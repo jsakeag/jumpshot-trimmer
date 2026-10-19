@@ -161,6 +161,18 @@ def reveal(request: Request, stem: str | None = None):
     return {}
 
 
+@app.post("/api/clear")
+def clear_all():
+    """Move everything in data/ and out/ to the Trash (recoverable with Put Back)."""
+    if any(not j["error"] for j in jobs.values()):
+        raise HTTPException(409, "Wait for shot-finding and exports to finish first.")
+    items = [p for d in (paths.DATA_DIR, paths.OUT_DIR) if d.exists() for p in d.iterdir()]
+    if items:
+        subprocess.run(["trash", *map(str, items)], check=True)
+    jobs.clear()
+    return {"trashed": len(items)}
+
+
 @app.get("/api/videos")
 def list_videos():
     return [summary(v) for v in video_files()]

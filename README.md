@@ -74,6 +74,9 @@ it: System Settings → Privacy & Security → Files and Folders.) To watch a di
 
 On a Mac keyboard: space plays/pauses, ← → move between clips, D drops/keeps.
 
+When you're done, **Clear all videos** (bottom of the home page) moves everything in `data/` and
+`out/` to the Trash. Your originals stay in your iPhone's Photos.
+
 ## Command line
 
 Put your video in `data/`, e.g. `data/IMG_0121.MOV`.

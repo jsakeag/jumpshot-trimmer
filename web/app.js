@@ -63,25 +63,35 @@ function showLibrary() {
       ${inboxError ? `<p class="hint error">${esc(inboxError)}</p>` : ''}
     </section>
     <h2>Videos</h2>
-    <ul class="videos" id="videos"><li class="empty">Loading…</li></ul>`;
+    <ul class="videos" id="videos"><li class="empty">Loading…</li></ul>
+    <button class="btn danger" id="clear-all" hidden>Clear all videos</button>`;
 
   $('#open-out')?.addEventListener('click', () => reveal());
+  $('#clear-all').addEventListener('click', async () => {
+    const n = $('#videos').querySelectorAll('.video').length;
+    if (!confirm(`Move all ${n} videos and their exports to the Trash?\n\nOriginals stay in your iPhone’s Photos.`)) return;
+    try { await api('/api/clear', { method: 'POST' }); } catch (e) { return alert(e.message); }
+    refresh();
+  });
 
   // keep checking, so AirDropped videos and job progress show up on their own
   let timer, alive = true;
   cleanup = () => { alive = false; clearTimeout(timer); };
-  (async function refresh() {
+  async function refresh() {
+    clearTimeout(timer);
     try {
       const vids = await api('/api/videos');
       if (!alive) return;
       $('#videos').innerHTML = vids.length
         ? vids.map(videoRow).join('')
         : '<li class="empty">No videos yet. AirDrop one from your iPhone.</li>';
+      $('#clear-all').hidden = !vids.length;
     } catch (e) {
       if (alive) $('#videos').innerHTML = `<li class="error">${esc(e.message)}</li>`;
     }
     if (alive) timer = setTimeout(refresh, 2000);
-  })();
+  }
+  refresh();
 }
 
 function videoStatus(v) {

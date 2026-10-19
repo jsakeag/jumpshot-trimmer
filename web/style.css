@@ -92,6 +92,8 @@ h2 { font-size: 1rem; margin: 24px 0 8px; color: var(--muted); font-weight: 600;
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .btn.big { width: 100%; min-height: 52px; font-size: 1.05rem; }
+.btn.danger { color: var(--drop); border-color: var(--drop); }
+#clear-all { margin-top: 16px; }
 
 .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 12px; }
 .bar > div { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
