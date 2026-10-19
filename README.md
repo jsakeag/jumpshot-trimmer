@@ -59,6 +59,7 @@ Write down the numbers of any clips that aren't shots.
 ```
 
 This creates `out/IMG_0121/IMG_0121_final.mp4` without those clips. Ranges work too: `3,7,10-12`.
+The final video has no captions or chapters, so it's clean to AirDrop or share.
 
 Clip numbers always refer to the review video, so to change your mind, run `trim`
 again with the full list. Each run replaces the previous final video.
@@ -73,7 +74,7 @@ All results go in `out/<video name>/`:
 | `<name>_final.mp4` | Pass 2 video: review minus the clips you dropped |
 | `clips.json` | Clip times in the original video (used by `trim`) |
 | `pose.npz` | Cached pose data, so re-runs skip the slow step |
-| `*.srt`, `*.chapters.txt` | Clip labels embedded in the videos |
+| `*.srt`, `*.chapters.txt` | Clip labels embedded in the review video |
 
 ## Tuning detection
 

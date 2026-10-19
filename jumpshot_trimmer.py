@@ -283,23 +283,27 @@ def write_clip_labels(clips, srt_path, chapters_path):
     chapters_path.write_text("\n".join(chap) + "\n")
 
 
-def export(video, clips, out):
-    """Join the clips into one video, with clip labels as subtitles and chapters."""
+def export(video, clips, out, labels):
+    """Join the clips into one video, keeping the original's metadata. With labels, clip numbers
+    are added as subtitles and chapters."""
     _, has_audio = probe(video)
     expr = "+".join(f"between(t,{c['start']},{c['end']})" for c in clips)
-    srt, chapters = out.with_suffix(".srt"), out.with_suffix(".chapters.txt")
-    write_clip_labels(clips, srt, chapters)
     filters = f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB,format=yuv420p[v]"
     maps = ["-map", "[v]"]
     if has_audio:
         filters += f";[0:a]aselect='{expr}',asetpts=N/SR/TB[a]"
         maps += ["-map", "[a]"]
-    cmd = ["ffmpeg", "-y", "-v", "error", "-stats", "-i", str(video), "-i", str(chapters), "-i", str(srt),
-           "-filter_complex", filters, *maps, "-map", "2:s", "-map_chapters", "1",
+    inputs, label_opts = ["-i", str(video)], []
+    if labels:
+        srt, chapters = out.with_suffix(".srt"), out.with_suffix(".chapters.txt")
+        write_clip_labels(clips, srt, chapters)
+        inputs += ["-i", str(chapters), "-i", str(srt)]
+        maps += ["-map", "2:s", "-map_chapters", "1"]
+        label_opts = ["-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default"]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-stats", *inputs, "-filter_complex", filters, *maps,
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k",
-           "-c:s", "mov_text", "-metadata:s:s:0", "language=eng",
-           "-disposition:s:0", "default",
-           "-movflags", "+faststart", str(out)]
+           *label_opts, "-map_metadata", "0",  # capture date + location, so Photos sorts it right
+           "-movflags", "+faststart+use_metadata_tags", str(out)]
     subprocess.run(cmd, check=True)
 
 
@@ -359,7 +363,7 @@ def cmd_detect(args):
     if args.dry_run or not clips:
         return
     review = out_dir / f"{video.stem}_review.mp4"
-    export(video, clips, review)
+    export(video, clips, review, labels=True)
     print(f"\nExported {review}\nWatch it, then drop clips with:\n"
           f"  python jumpshot_trimmer.py trim {video.stem} <clip numbers, e.g. 3,7,10-12>")
 
@@ -380,7 +384,7 @@ def cmd_trim(args):
     print(f"Dropping {len(args.drop)} of {len(clips)} clips -> {len(kept)} clips "
           f"({kept[-1]['reel_end']:.1f}s).")
     final = OUT_DIR / stem / f"{stem}_final.mp4"
-    export(Path(data["video"]), kept, final)
+    export(Path(data["video"]), kept, final, labels=False)
     print(f"Exported {final}")
 
 
