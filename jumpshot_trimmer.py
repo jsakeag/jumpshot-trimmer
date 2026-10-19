@@ -107,6 +107,19 @@ def extract_pose(video, model_name, device, analysis_fps, batch):
     return np.array(times), np.array(kps), fps / stride
 
 
+def load_or_extract_pose(args, cache):
+    """Pose is the slow step, so save it and reuse it when re-running with new thresholds."""
+    key = f"{args.video.resolve()}|{args.video.stat().st_size}|{args.model}|{args.analysis_fps}"
+    if cache.exists() and not args.fresh:
+        c = np.load(cache)
+        if str(c["key"]) == key:
+            print(f"  using cached pose from {cache}")
+            return c["times"], c["kps"], float(c["fps"])
+    times, kps, fps = extract_pose(args.video, args.model, args.device, args.analysis_fps, args.batch)
+    np.savez_compressed(cache, times=times, kps=kps, fps=fps, key=key)
+    return times, kps, fps
+
+
 # ---------------------------------------------------------------- signals
 
 def fill_gaps(a, max_gap):
@@ -273,14 +286,15 @@ def main():
     p.add_argument("--device", default=None, help="mps, cpu, cuda (default: mps if available)")
     p.add_argument("--analysis-fps", type=float, default=30, help="frames/sec to run pose on")
     p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--arm-up", type=float, default=0.5,
+    p.add_argument("--arm-up", type=float, default=0.4,
                    help="wrist height above shoulders (torso lengths) counted as arms up")
-    p.add_argument("--arm-peak", type=float, default=0.8,
+    p.add_argument("--arm-peak", type=float, default=0.55,
                    help="min wrist height above shoulders at release (torso lengths)")
-    p.add_argument("--jump", type=float, default=0.15,
+    p.add_argument("--jump", type=float, default=0.1,
                    help="min hip rise during the shot (torso lengths)")
     p.add_argument("--dry-run", action="store_true", help="detect and write JSON, skip export")
     p.add_argument("--no-maybe", action="store_true", help="skip exporting near-miss clips")
+    p.add_argument("--fresh", action="store_true", help="ignore cached pose and re-run detection")
     p.add_argument("--debug", action="store_true", help="also write per-frame signals CSV")
     args = p.parse_args()
 
@@ -298,7 +312,7 @@ def main():
 
     duration, has_audio = probe(args.video)
     print(f"Analyzing {args.video.name} ({duration:.0f}s) on {args.device}...")
-    times, kps, fps = extract_pose(args.video, args.model, args.device, args.analysis_fps, args.batch)
+    times, kps, fps = load_or_extract_pose(args, out.parent / "pose.npz")
     sig = compute_signals(kps, fps)
     shots, near = detect_shots(times, sig, fps, args)
     windows = clip_windows(shots, duration, args.pre, args.post)
