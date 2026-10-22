@@ -2,6 +2,8 @@
 
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 
 # Original metadata worth carrying over: capture date, location, device.
@@ -38,7 +40,7 @@ def timeline(clips):
 
 
 def label(c):
-    return f"Clip {c['n']}{' (maybe)' if c['maybe'] else ''} · {fmt_time(c['start'])} in original"
+    return f"{c.get('label', 'Clip')} {c['n']}{' (maybe)' if c['maybe'] else ''} · {fmt_time(c['start'])} in original"
 
 
 def write_clip_labels(clips, srt_path, chapters_path):
@@ -71,40 +73,56 @@ def metadata_args(tags):
     return args
 
 
+def frame_rate(video):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
+                          "-of", "default=nw=1:nk=1", str(video)], capture_output=True, text=True, check=True).stdout.strip()
+    return out or "30"
+
+
+def _run(cmd):
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-500:]}")
+
+
 def export(video, clips, out, labels, progress=None):
     """Join the clips into one video, keeping the original's metadata. With labels, clip numbers
     are added as subtitles and chapters.
 
-    progress(fraction) is called as it goes; without it ffmpeg prints its own stats.
+    Each clip is cut on its own (seeking straight to it, so only the clips are decoded), then the
+    pieces are joined without re-encoding. progress(fraction) is called after each clip.
     """
     _, has_audio, tags = probe(video)
-    expr = "+".join(f"between(t,{c['start']},{c['end']})" for c in clips)
-    filters = f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB,format=yuv420p[v]"
-    maps = ["-map", "[v]"]
-    if has_audio:
-        filters += f";[0:a]aselect='{expr}',asetpts=N/SR/TB[a]"
-        maps += ["-map", "[a]"]
-    inputs, extra = ["-i", str(video)], []
-    if labels:
-        srt, chapters = out.with_suffix(".srt"), out.with_suffix(".chapters.txt")
-        write_clip_labels(clips, srt, chapters)
-        inputs += ["-i", str(chapters), "-i", str(srt)]
-        maps += ["-map", "2:s", "-map_chapters", "1"]
-        extra += ["-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default"]
-    report = ["-progress", "pipe:1", "-nostats"] if progress else ["-stats"]
+    rate = frame_rate(video)
     partial = out.with_name(out.stem + ".partial" + out.suffix)
-    cmd = ["ffmpeg", "-y", "-v", "error", *report, *inputs, "-filter_complex", filters, *maps,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k",
-           *metadata_args(tags), *extra, "-movflags", "+faststart+use_metadata_tags", str(partial)]
-    if progress:
-        total = sum(c["end"] - c["start"] for c in clips)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        for line in proc.stdout:
-            key, _, val = line.strip().partition("=")
-            if key == "out_time_us" and val.isdigit():
-                progress(min(1.0, int(val) / 1e6 / total))
-        if proc.wait():
-            raise RuntimeError(f"ffmpeg failed: {proc.stderr.read().strip()[-500:]}")
-    else:
-        subprocess.run(cmd, check=True)
+    with tempfile.TemporaryDirectory(dir=out.parent, prefix=".export-") as tmp:
+        tmp = Path(tmp)
+        parts = []
+        for i, c in enumerate(clips):
+            part = tmp / f"{i:05d}.mp4"
+            # identical encoding settings for every piece, so they can be joined losslessly
+            _run(["ffmpeg", "-v", "error", "-y", "-ss", str(c["start"]), "-i", str(video), "-t", str(c["end"] - c["start"]),
+                  "-map", "0:v:0", *(["-map", "0:a:0"] if has_audio else []),
+                  "-vf", "format=yuv420p", "-fps_mode", "cfr", "-r", rate,
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                  "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", str(part)])
+            parts.append(part)
+            if progress:
+                progress((i + 1) / len(clips) * 0.97)
+        listing = tmp / "parts.txt"
+        listing.write_text("".join(f"file '{p.name}'\n" for p in parts))
+        inputs, maps, extra = ["-f", "concat", "-safe", "0", "-i", str(listing)], ["-map", "0:v", *(["-map", "0:a"] if has_audio else [])], []
+        if labels:
+            srt, chapters = out.with_suffix(".srt"), out.with_suffix(".chapters.txt")
+            write_clip_labels(clips, srt, chapters)
+            inputs += ["-i", str(chapters), "-i", str(srt)]
+            maps += ["-map", "2:s", "-map_chapters", "1"]
+            extra += ["-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default"]
+        meta = metadata_args(tags)
+        if labels:  # take metadata from the chapters file (only chapter titles) instead of clearing it
+            meta[meta.index("-map_metadata") + 1] = "1"
+        _run(["ffmpeg", "-v", "error", "-y", *inputs, *maps, "-c:v", "copy", "-c:a", "copy", *extra,
+              *meta, "-movflags", "+faststart+use_metadata_tags", str(partial)])
     partial.replace(out)
+    if progress:
+        progress(1.0)

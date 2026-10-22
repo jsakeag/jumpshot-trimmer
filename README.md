@@ -1,15 +1,12 @@
-# Jumpshot Trimmer
+# Mock Premiere Lite
 
-Cuts a basketball session video down to just your shots (jumpshots and layups).
-Each clip runs from 0.5 s before the gather to 0.5 s after release.
+A small web video editor for reviewing practice sessions, mainly tennis. You mark strokes
+while the video plays, tag each one with habits you want to track (for example "one-footed hop"
+or "closed weight shift") and score how strongly each tag shows, then filter and rank them.
+Export joins the confirmed strokes into one video.
 
-It works in two passes:
-
-1. **Detect**: a pose model finds every shot. It leans toward including too much:
-   borderline moments are kept and labeled **maybe**, so nothing is cut without you seeing it.
-2. **Review**: you watch the clips, drop the ones that aren't shots, and export the final video.
-
-You can use it from a web app (on your Mac or your phone) or from the command line.
+It's a lite take on the sister repo `mock-premiere-pro`: a preview window, a timeline and an
+annotations panel, running in your browser on your Mac.
 
 ## Setup (once)
 
@@ -21,113 +18,148 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-The pose model (`yolo11s-pose.pt`) downloads automatically on the first run.
-
-## Filming tips
-
-- Phone on the floor behind the hoop, facing the court, not moving.
-- Works best with just you in frame.
-
-## Web app
+## Run
 
 ```sh
 .venv/bin/python server.py
 ```
 
-It prints two links and a QR code:
+Open http://localhost:8000. Put session videos in `data/` (**Open data folder** on the home page)
+and they show up in the list. A video is only read when you open it.
 
-- **On your Mac**: open `http://localhost:8000`.
-- **On your iPhone** (same Wi-Fi as the Mac): scan the QR code with the camera.
-  The link includes a private key; after opening it once, your phone stays signed in.
-  The first time, macOS may ask whether Python can accept incoming connections. Click Allow.
+## The editor
 
-Your Mac does all the work, so keep the server running until you're done.
+- **Preview** (center): plays the video, with a scrub bar showing your annotations. The transport
+  has play/pause, frame steps, previous/next annotation, speed, loop, volume and full screen.
+- **Timeline** (bottom): a time ruler, a filmstrip, the audio's loudness (handy for spotting
+  hits) and your annotations. Click or drag on the top tracks to scrub. Drag an annotation to move
+  it, or drag its ends to trim it; ends snap to the playhead. Zoom with the slider, `=` / `-`, or
+  ⌘-scroll / pinch.
+- **Inspector** (left): the selected annotation's kind, in and out times, whether it's
+  confirmed, and its tags with a 1–5 score each.
+- **Annotations panel** (right, `\` to open or close): every annotation, split into
+  **Confirmed** and **Maybe**, with their tags. Filter by kind and by tags (any or all), set a
+  minimum strength, and sort by time or by strength (the highest score among the selected tags,
+  or among all tags if none is selected). **Play only these** (`R`) plays just the listed
+  annotations and skips everything between them, e.g. pick FH under Kind to watch only forehands.
 
-### Adding videos: AirDrop
+### Marking strokes
 
-On your iPhone, open Photos, select your session videos, tap **Share → AirDrop**, and pick your Mac.
+Hold a key while the video plays, from the start of the stroke to the end:
 
-AirDrop saves them to your Mac's Downloads folder. The server moves new iPhone videos from there
-into `data/` within a few seconds, and finding shots starts automatically, one video at a time
-(about 4 minutes for a 9-minute video the first time). AirDrop sends the full-quality original,
-so long videos, capture date and location all come through intact.
+| Key | Marks |
+|---|---|
+| `F` | Forehand |
+| `B` | Backhand |
+| `;` | Serve |
+| `⇧F` / `⇧B` | Forehand / backhand, tagged `volley` |
 
-It only moves iPhone camera originals (`.MOV`) that arrive after the server first ran, so the
-rest of your Downloads is left alone. To add a video that was already there, move it into `data/`
-yourself; anything new in `data/` gets analyzed automatically.
+A quick tap (or a press while paused) marks 1.5 s around the playhead. While paused, you can
+hold the key and step with the arrow keys to mark precisely.
 
-If macOS asks whether your terminal can access the Downloads folder, click Allow. (If you missed
-it: System Settings → Privacy & Security → Files and Folders.) To watch a different folder, run
-`server.py --inbox <folder>`.
+Started too late? Press `Z`: it takes back the last mark and rewinds to 1 s before its key went
+down, so you can mark it again. Press it again to take back the one before.
 
-### Reviewing and exporting
+Annotations you mark are confirmed. To tag one, select it and press `T`: type to search the labels, ↑↓ and Enter to pick (or Enter on
+**+ Create** for a new one), then type its score (1–5). In the picker, ✎ renames a label and ×
+deletes it, everywhere it's used in every video; click its dot to change its color. Labels are
+shared by all your videos.
 
-1. **Review.** Open a video. Tap a clip to play it. With *Auto-play next clip* on, it plays
-   straight through. Tap **Keeping · tap to drop** for anything that isn't a shot. The **Maybes**
-   filter shows only the borderline clips. Your picks save automatically.
-2. **Export final video.** It's saved as `out/<name>/<name>_final.mp4`.
-3. **Get it onto your iPhone with AirDrop.** On the Mac, click **Show in Finder** (or **Open out
-   folder in Finder** on the home screen), then right-click the video → Share → AirDrop → your
-   iPhone. The export keeps the original's capture date, so it lands in Photos on the day you
-   filmed it. (From the phone you can also tap **Download**, then open it from Safari's
-   downloads and Share → Save Video.)
+### Footwork
 
-On a Mac keyboard: space plays/pauses, ← → move between clips, D drops/keeps.
+Footwork marked on the video belongs to a forehand or backhand, and can only be marked on one:
+the one the playhead is in (or the selected one). Press `D` and click to place steps (numbered in
+order); ⇧-click places one that lands together with the previous step, like a hop, so both get
+the same number. ⌥-click, with or without the tool, where your feet were at the split step (two feet; a
+third click replaces the oldest). They show on the video whenever that stroke plays. Each stroke's steps also
+list in the inspector as a numbered sequence (split-step feet first), where you name each one with the same
+kind of picker, e.g. "drop step". Step names and split-step foot names are each their own shared list, separate from labels. Mark a
+step name bad with ⚠ in the picker (e.g. "balance step", one that ideally isn't needed): those
+steps show in red, the panel counts them on each stroke, and **⚠ Bad steps** filters to strokes
+that have any. Click a step to
+select it (a new one is selected too) and press ⌫ to delete it, again for the one before; or
+right-click one to remove it; `Esc` puts the tool down. They aren't burned into the export.
 
-When you're done, **Clear all videos** (bottom of the home page) moves everything in `data/` and
-`out/` to the Trash. Your originals stay in your iPhone's Photos.
+### All keys
+
+| Key | Does |
+|---|---|
+| Space / `K` | Play / pause |
+| ← → | Step a frame (⇧: 1 s) |
+| `J` / `L` | 5 s back / ahead (with Play only these on, the arrow keys and J/L skip the gaps between listed annotations) |
+| ↑ ↓ | Previous / next annotation in the panel |
+| Enter | Confirm, or back to maybe |
+| `I` / `O` | Set the selected annotation's in / out to the playhead |
+| `T` | Add a tag |
+| `P` | Play the selected annotation |
+| ⌫ | Delete it (or the newest mark); press again to delete the mark before |
+| `D` | Step tool; ⌥-click marks split-step feet |
+| `R` | Play only the listed annotations, on/off |
+| `M` | Mute |
+| ⌘Z / ⇧⌘Z | Undo / redo |
+| `?` | Show all keys |
+
+Everything saves on its own a moment after you change it.
+
+## Plugins
+
+**Plugins…** runs a detector that annotates for you. What it finds comes in as **maybe** for you
+to confirm (✓ in the panel, or Enter); ones the detector wasn't sure about are also marked
+**weak**. Running a plugin again replaces its maybes that you haven't tagged. Plugins only
+annotate; they never export.
+
+- **Tennis serves**: serves from either player, by pose (both arms up after standing still),
+  from the toss to the follow-through. Drag a box around the far baseline on the current frame
+  (with about two player-heights of room above for the toss) so the far player can be seen up
+  close; it's remembered for the next video. Takes about 0.8x the video's length the first time;
+  the pose is cached after that. A serve with no contact sound right after it is weak. Tuned on
+  one session filmed from the corner, so a different angle or light may need the thresholds in
+  `trimmer/serves.py` adjusted.
+- **Tennis points**: points from the sound of the ball, a run of racket hits less than 8 s
+  apart. Takes seconds. Tightness (loose, medium, tight) trades how much is kept against how
+  much of each point survives.
+- **Basketball shots**: jumpshots and layups by pose, from the gather to just after release.
+  Thresholds are in `DetectParams` in `trimmer/detect.py`.
+
+A plugin is an entry in `trimmer/plugins.py`: a function that takes the video and returns
+`[{start, end, weak}]`, plus the kind of annotation it makes.
+
+## Export
+
+**Export** in the top bar joins every confirmed annotation (maybes are left out; overlapping ones
+are joined) into `out/<name>/<name>_final.mp4`. It keeps the original's capture date and
+location. Then use **Show in Finder** or **Download**.
 
 ## Command line
 
-Put your video in `data/`, e.g. `data/IMG_0121.MOV`.
-
 ```sh
-.venv/bin/python cli.py detect IMG_0121.MOV      # pass 1
-.venv/bin/python cli.py trim IMG_0121 1,24,27    # pass 2
+.venv/bin/python cli.py detect IMG_0121.MOV points --tightness medium
+.venv/bin/python cli.py detect IMG_0121.MOV serves --far-box 0.47,0.42,1,0.79
+.venv/bin/python cli.py list IMG_0121      # annotations and their tags
+.venv/bin/python cli.py review IMG_0121    # every annotation, labeled with subtitles and chapters
+.venv/bin/python cli.py export IMG_0121    # the confirmed annotations, clean
 ```
 
-`detect` creates `out/IMG_0121/IMG_0121_review.mp4` with every clip numbered:
-subtitles show `Clip 7 · 2:16 in original` (or `Clip 7 (maybe) · …`), and chapters let you jump
-between clips. In QuickTime Player, turn subtitles on under View > Subtitles > English, and use
-View > Show Chapters or Shift-⌘-→ / ← to move between clips.
+The web app and the command line share the same project files, so you can mix them.
 
-`trim` creates `out/IMG_0121/IMG_0121_final.mp4` without the clips you list. Ranges work too:
-`3,7,10-12`. Clip numbers always refer to the review video, so to change your mind, run `trim`
-again with the full list. The final video has no captions or chapters, so it's clean to share.
+## Files
 
-The web app and the command line share the same results, so you can mix them.
-
-## Output files
-
-All results go in `out/<video name>/`:
+Everything for a video goes in `out/<video name>/`:
 
 | File | What it is |
 | --- | --- |
-| `<name>_final.mp4` | The final video: kept clips, with the original's date and location |
-| `<name>_review.mp4` | Every clip, numbered (command line only) |
-| `clips.json` | Clip times in the original video, and which ones you dropped |
-| `pose.npz` | Cached pose data, so re-running detection takes seconds |
+| `project.json` | The annotations, their tags and scores, and plugin settings |
+| `<name>_final.mp4` | The exported video |
+| `<name>_review.mp4` | Every annotation, labeled (command line only) |
+| `filmstrip.jpg`, `wave.bin`, `media.json` | What the timeline draws |
+| `pose.npz`, `serve_pose.npz` | Cached pose data from plugins |
+
+**Clear all videos** on the home page moves everything in `data/` and `out/` to the Trash.
 
 ## Project layout
 
 | Path | What it is |
 | --- | --- |
-| `trimmer/` | The core, shared by both front ends: pose (`pose.py`), shot detection (`detect.py`), ffmpeg export (`export.py`), per-video results (`project.py`), AirDrop inbox (`inbox.py`) |
-| `server.py`, `web/` | The web app: API server and the page it serves |
+| `trimmer/` | The core: annotations and exports (`project.py`), plugins (`plugins.py`) and their detectors (`serves.py`, `tennis.py`, `detect.py` with `pose.py`), timeline media (`media.py`), ffmpeg export (`export.py`) |
+| `server.py`, `web/` | The web app: API server and the editor page (`editor.js`, `timeline.js`) |
 | `cli.py` | The command line |
-
-## Tuning detection
-
-If it misses shots or picks up too much junk, adjust these `cli.py detect` options
-(all measured in torso lengths, so they work at any distance from the camera):
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--arm-peak` | 0.55 | How high the wrist must get above the shoulders at release. Lower catches more. |
-| `--arm-up` | 0.4 | Wrist height that counts as "arms up". |
-| `--jump` | 0.1 | How much the hips must rise. Lower catches more. |
-| `--pre` / `--post` | 0.5 | Seconds kept before the gather / after release. |
-
-Other options: `--dry-run` (list clips without exporting), `--fresh` (redo pose detection),
-`--debug` (write per-frame signals to `signals.csv`). Run `.venv/bin/python cli.py detect -h`
-for the full list. The defaults live in `DetectParams` in `trimmer/detect.py`, which the web app uses.

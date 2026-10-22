@@ -1,95 +1,73 @@
 #!/usr/bin/env python3
-"""Web app for the jumpshot trimmer. Run it, then open the printed link on your Mac or phone.
+"""Web app: annotate strokes on a session video, tag and score them, and export the confirmed ones.
 
     .venv/bin/python server.py
 
-Add videos by AirDropping them from your iPhone to this Mac: new iPhone videos that land in
-Downloads are moved into data/. Shot-finding starts automatically for any new video in data/.
-
-Anyone else on your Wi-Fi needs the key in the link to get in. Your own Mac doesn't.
+Then open http://localhost:8000. Put videos in data/.
 """
 
 import argparse
-import secrets
+import json
 import shutil
-import socket
 import subprocess
 import sys
 import threading
-import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from trimmer import paths, project
-from trimmer.inbox import DEFAULT_FOLDER, SETTLE_S, Inbox
+from trimmer import media, paths, plugins, project
+from trimmer.export import frame_rate, probe
 
 WEB_DIR = paths.ROOT / "web"
-KEY_FILE = paths.ROOT / ".web_key"
+SETTINGS_FILE = paths.ROOT / ".settings.json"  # outside out/, so Clear all keeps it
 
 app = FastAPI()
-executor = ThreadPoolExecutor(max_workers=1)  # one job at a time; the pose model wants the whole GPU
-jobs = {}                                      # stem -> {"stage", "progress", "error"}
+executor = ThreadPoolExecutor(max_workers=1)        # plugins and exports; the pose model wants the whole GPU
+media_executor = ThreadPoolExecutor(max_workers=1)  # filmstrips and waveforms, so they don't wait behind a plugin
+jobs = {}        # stem -> {"stage", "label", "progress", "error", "result"}
+media_jobs = {}  # stem -> None while making, else why it failed
 jobs_lock = threading.Lock()
-inbox = None                                   # set in main()
-
-
-def load_key():
-    if not KEY_FILE.exists():
-        KEY_FILE.write_text(secrets.token_urlsafe(9))
-    return KEY_FILE.read_text().strip()
-
-
-KEY = load_key()
-
-
-@app.middleware("http")
-async def require_key(request: Request, call_next):
-    """Requests from this Mac are trusted. Others need ?key=... once, then a cookie."""
-    if request.client and request.client.host in ("127.0.0.1", "::1"):
-        return await call_next(request)
-    if secrets.compare_digest(request.cookies.get("key", ""), KEY):
-        return await call_next(request)
-    if secrets.compare_digest(request.query_params.get("key", ""), KEY):
-        response = await call_next(request)
-        response.set_cookie("key", KEY, max_age=10 * 365 * 86400, httponly=True, samesite="lax")
-        return response
-    return PlainTextResponse("Open the link printed in the terminal; it includes the key.", status_code=403)
 
 
 # ---------------------------------------------------------------- jobs
 
-def start_job(stem, stage, fn):
-    """Run fn(progress) in the background. Only one job per video at a time."""
+def start_job(stem, stage, label, fn):
+    """Run fn(progress) in the background. Only one job per video at a time. A finished job stays
+    listed with its result until the next one starts, so the page can tell it ended."""
     with jobs_lock:
         job = jobs.get(stem)
-        if job and not job["error"]:
-            raise HTTPException(409, f"{stem} is already {job['stage']}")
-        job = jobs[stem] = {"stage": "queued", "next": stage, "progress": 0.0, "error": None}
+        if job and not job["error"] and job["stage"] != "done":
+            raise HTTPException(409, f"{stem} is already {job['label'].lower()}")
+        job = jobs[stem] = {"stage": "queued", "next": stage, "label": label, "progress": 0.0, "error": None,
+                            "result": None}
 
     def run():
         job["stage"] = stage
         try:
-            fn(lambda frac: job.__setitem__("progress", round(frac, 3)))
+            job["result"] = fn(lambda frac: job.__setitem__("progress", round(frac, 3)))
         except Exception as e:
             traceback.print_exc()
             job["error"] = str(e) or type(e).__name__
         else:
-            with jobs_lock:
-                jobs.pop(stem, None)
+            job["stage"] = "done"
 
     executor.submit(run)
 
 
-def start_detect(stem, video):
-    start_job(stem, "detecting", lambda progress: project.detect(
-        video, progress=lambda done, total: progress(done / total)))
+def busy():
+    return any(not j["error"] and j["stage"] != "done" for j in jobs.values()) or any(
+        e is None for e in media_jobs.values())
+
+
+def load_settings():
+    return json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
 
 
 # ---------------------------------------------------------------- videos
@@ -115,61 +93,54 @@ def video_for(stem):
 
 
 def summary(video):
+    """What the video list shows. Reads only the project file, never the video."""
     stem = video.stem
-    s = {"name": video.name, "stem": stem, "job": jobs.get(stem), "clips": None}
+    s = {"name": video.name, "stem": stem, "job": jobs.get(stem), "annotations": 0, "maybes": 0, "exported": False}
     try:
         data = project.load(stem)
     except FileNotFoundError:
         return s
-    final = data["final"] if project.final_path(stem).exists() else None
-    s.update(clips=len(data["clips"]), maybes=sum(c["maybe"] for c in data["clips"]),
-             dropped=len(data["dropped"]), final=final,
-             final_current=bool(final and final["dropped"] == data["dropped"]))
+    maybes = sum(a["maybe"] for a in data["annotations"])
+    s.update(annotations=len(data["annotations"]) - maybes, maybes=maybes, exported=project.final_current(data))
     return s
 
 
-def mac_name():
-    try:
-        return subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
-                              check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return socket.gethostname().removesuffix(".local")
+def status(stem, data):
+    final = data["final"] if data["final"] and project.final_path(stem).exists() else None
+    return {"rev": data["rev"], "job": jobs.get(stem), "final": final,
+            "final_current": bool(final) and project.final_current(data)}
 
 
 @app.get("/api/info")
-def info(request: Request):
-    return {"mac_name": mac_name(), "on_server_mac": from_server_mac(request),
-            "inbox": str(inbox.folder) if inbox else None,
-            "inbox_error": inbox.error if inbox else None}
-
-
-def from_server_mac(request):
-    """True for a browser on this Mac, whether it opened localhost or the Wi-Fi address."""
-    host = request.client.host if request.client else None
-    return host in ("127.0.0.1", "::1") or (host is not None and host == lan_ip())
+def info():
+    return {"plugins": [p.info() for p in plugins.PLUGINS.values()], "kinds": project.KIND_LABEL,
+            "last_far_box": load_settings().get("far_box"), "data_dir": str(paths.DATA_DIR)}
 
 
 @app.post("/api/reveal")
-def reveal(request: Request, stem: str | None = None):
-    """Show the out/ folder, or a video's final export, in Finder. Only from the Mac itself."""
-    if not from_server_mac(request):
-        raise HTTPException(403, "Only available on the Mac running the server")
-    target = project.final_path(stem) if stem else paths.OUT_DIR
-    if not target.exists():
-        raise HTTPException(404, "Not exported yet" if stem else "No out folder yet")
-    subprocess.run(["open", "-R", str(target)] if stem else ["open", str(target)], check=True)
+def reveal(stem: str | None = None):
+    """Show a video's final export in Finder, or open the data folder."""
+    if stem:
+        target = project.final_path(stem)
+        if not target.exists():
+            raise HTTPException(404, "Not exported yet")
+        subprocess.run(["open", "-R", str(target)], check=True)
+    else:
+        paths.DATA_DIR.mkdir(exist_ok=True)
+        subprocess.run(["open", str(paths.DATA_DIR)], check=True)
     return {}
 
 
 @app.post("/api/clear")
 def clear_all():
     """Move everything in data/ and out/ to the Trash (recoverable with Put Back)."""
-    if any(not j["error"] for j in jobs.values()):
-        raise HTTPException(409, "Wait for shot-finding and exports to finish first.")
+    if busy():
+        raise HTTPException(409, "Wait for plugins and exports to finish first.")
     items = [p for d in (paths.DATA_DIR, paths.OUT_DIR) if d.exists() for p in d.iterdir()]
     if items:
         subprocess.run(["trash", *map(str, items)], check=True)
     jobs.clear()
+    media_jobs.clear()
     return {"trashed": len(items)}
 
 
@@ -178,45 +149,208 @@ def list_videos():
     return [summary(v) for v in video_files()]
 
 
+VOCABS = {"labels": "tag names", "steps": "footwork step names", "splits": "split-step foot names"}
+
+
+def check_kind(kind):
+    if kind not in VOCABS:
+        raise HTTPException(404, f"No list called {kind}")
+
+
+def clean_name(name):
+    name = " ".join(name.split())[:60]
+    if not name:
+        raise HTTPException(400, "It needs a name")
+    return name
+
+
+def vocab(kind):
+    """The names to pick from for tags (labels) or steps: every one created or used in any video,
+    most used first, with how often each is used, its color (if one was picked) and whether it's
+    marked bad (a step that ideally isn't needed)."""
+    settings = load_settings()
+    counts = {name: 0 for name in settings.get(kind, [])}
+    for p in paths.OUT_DIR.glob("*/project.json") if paths.OUT_DIR.exists() else []:
+        for a in json.loads(p.read_text()).get("annotations", []):
+            for name in project.names_in(kind, a):
+                counts[name] = counts.get(name, 0) + 1
+    colors = settings.get("colors", {}).get(kind, {})
+    bad = set(settings.get("bad", {}).get(kind, []))
+    return [{"name": n, "count": counts[n], "color": colors.get(n), "bad": n in bad}
+            for n in sorted(counts, key=lambda k: (-counts[k], k.lower()))]
+
+
+def save_vocab(kind, update):
+    """update(names, colors, bad) changes this kind's saved names, colors and bad names in place."""
+    settings = load_settings()
+    names = settings.get(kind, [])
+    colors = settings.setdefault("colors", {}).setdefault(kind, {})
+    bad = settings.setdefault("bad", {}).setdefault(kind, [])
+    update(names, colors, bad)
+    settings[kind] = names
+    SETTINGS_FILE.write_text(json.dumps(settings))
+
+
+@app.get("/api/vocab/{kind}")
+def get_vocab(kind: str):
+    check_kind(kind)
+    return vocab(kind)
+
+
+class Name(BaseModel):
+    name: str
+
+
+@app.post("/api/vocab/{kind}")
+def add_to_vocab(kind: str, body: Name):
+    """Add a name to pick from, before anything uses it."""
+    check_kind(kind)
+    name = clean_name(body.name)
+    save_vocab(kind, lambda names, colors, bad: None if any(n.lower() == name.lower() for n in names) else names.append(name))
+    return vocab(kind)
+
+
+class NameChange(BaseModel):
+    name: str
+    new_name: str | None = None
+    color: str | None = None
+    bad: bool | None = None
+
+
+@app.patch("/api/vocab/{kind}")
+def change_vocab(kind: str, body: NameChange):
+    """Rename a name everywhere it's used (into another existing name merges them), set its color,
+    or mark it bad or not."""
+    check_kind(kind)
+    if body.color is not None:
+        save_vocab(kind, lambda names, colors, bad: colors.__setitem__(body.name, body.color[:20]))
+    if body.bad is not None:
+        def mark(names, colors, bad):
+            bad[:] = [n for n in bad if n != body.name] + ([body.name] if body.bad else [])
+            if body.name not in names:  # keep it listed even if nothing uses it any more
+                names.append(body.name)
+        save_vocab(kind, mark)
+    if body.new_name is not None:
+        new = clean_name(body.new_name)
+        if new != body.name:
+            project.rename_everywhere(kind, body.name, new)
+
+            def update(names, colors, bad):
+                names[:] = [new if n == body.name else n for n in names if n != new] + ([] if body.name in names else [new])
+                if body.name in colors:
+                    colors.setdefault(new, colors.pop(body.name))
+                if body.name in bad:
+                    bad[:] = [n for n in bad if n not in (body.name, new)] + [new]
+            save_vocab(kind, update)
+    return vocab(kind)
+
+
+@app.delete("/api/vocab/{kind}")
+def delete_from_vocab(kind: str, name: str):
+    """Delete a name from the list and from everything that uses it."""
+    check_kind(kind)
+    project.rename_everywhere(kind, name, None)
+
+    def update(names, colors, bad):
+        names[:] = [n for n in names if n != name]
+        colors.pop(name, None)
+        bad[:] = [n for n in bad if n != name]
+    save_vocab(kind, update)
+    return vocab(kind)
+
+
 @app.get("/api/videos/{stem}")
 def get_video(stem: str):
     video = video_for(stem)
-    s = summary(video)
-    if s["clips"] is not None:
-        data = project.load(stem)
-        s.update(clip_list=data["clips"], dropped_list=data["dropped"])
-    return s
+    duration, has_audio, _ = probe(video)
+    num, _, den = frame_rate(video).partition("/")
+    data = project.load(stem, video)
+    return {"name": video.name, "stem": stem, "duration": duration, "has_audio": has_audio,
+            "fps": float(num) / float(den or 1), "annotations": data["annotations"], "plugins": data["plugins"],
+            **status(stem, data)}
 
 
-@app.post("/api/videos/{stem}/detect")
-def detect(stem: str):
-    start_detect(stem, video_for(stem))
-    return summary(video_for(stem))
+@app.get("/api/videos/{stem}/status")
+def get_status(stem: str):
+    return status(stem, project.load(stem, video_for(stem)))
 
 
-class Dropped(BaseModel):
-    dropped: list[int]
+class Annotations(BaseModel):
+    base_rev: int
+    annotations: list[dict]
 
 
-@app.put("/api/videos/{stem}/dropped")
-def set_dropped(stem: str, body: Dropped):
+@app.put("/api/videos/{stem}/annotations")
+def save_annotations(stem: str, body: Annotations):
     try:
-        project.set_dropped(stem, body.dropped)
-    except (FileNotFoundError, ValueError) as e:
+        data, added, removed = project.save_annotations(stem, video_for(stem), body.base_rev, body.annotations)
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, f"Couldn't save: {e}")
+    return {**status(stem, data), "added": added, "removed": removed}
+
+
+@app.post("/api/videos/{stem}/plugins/{name}")
+def run_plugin(stem: str, name: str, options: dict):
+    video = video_for(stem)
+    try:
+        plugin = plugins.get(name)
+        options = plugin.check(options)
+    except ValueError as e:
         raise HTTPException(400, str(e))
-    return summary(video_for(stem))
+    if "far_box" in options:  # prefill the box next time
+        SETTINGS_FILE.write_text(json.dumps({**load_settings(), "far_box": options["far_box"]}))
+    start_job(stem, "running", plugin.label, lambda progress: {
+        "added": project.run_plugin(video, name, options, progress)[1]})
+    return status(stem, project.load(stem, video))
 
 
 @app.post("/api/videos/{stem}/export")
 def export(stem: str):
     video = video_for(stem)
+    data = project.load(stem, video)
+    if not project.confirmed_windows(data):
+        raise HTTPException(400, "Nothing confirmed to export.")
+    start_job(stem, "exporting", "Export", lambda progress: {"clips": len(project.export_final(stem, progress)[1])})
+    return status(stem, data)
+
+
+@app.get("/api/videos/{stem}/media")
+def get_media(stem: str):
+    """Filmstrip and loudness info, or {"pending": true} while they're made (started on first ask)."""
+    video = video_for(stem)
+    info = media.load_info(stem)
+    if info:
+        return info
+    with jobs_lock:
+        state = media_jobs.get(stem, "new")
+        if state == "new":
+            media_jobs[stem] = None
+            media_executor.submit(make_media, stem, video)
+        elif state is not None:  # failed: report it, and try again on the next ask
+            del media_jobs[stem]
+            return {"error": state}
+    return {"pending": True}
+
+
+def make_media(stem, video):
     try:
-        if not project.kept_clips(project.load(stem)):
-            raise HTTPException(400, "Every clip is dropped.")
-    except FileNotFoundError as e:
-        raise HTTPException(400, str(e))
-    start_job(stem, "exporting", lambda progress: project.export_final(stem, progress=progress))
-    return summary(video)
+        media.make(video)
+        media_jobs.pop(stem, None)
+    except Exception as e:
+        traceback.print_exc()
+        media_jobs[stem] = str(e) or type(e).__name__
+
+
+@app.get("/api/videos/{stem}/filmstrip.jpg")
+def filmstrip(stem: str):
+    video_for(stem)
+    return FileResponse(media.filmstrip_path(stem), media_type="image/jpeg")
+
+
+@app.get("/api/videos/{stem}/wave.bin")
+def wave(stem: str):
+    video_for(stem)
+    return FileResponse(media.wave_path(stem), media_type="application/octet-stream")
 
 
 @app.get("/api/videos/{stem}/source")
@@ -240,7 +374,7 @@ def index():
 
 
 class FreshStaticFiles(StaticFiles):
-    """Make browsers (iPhone Safari especially) check for a newer app.js/style.css on every load."""
+    """Make the browser check for a newer app.js/style.css on every load."""
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
@@ -251,80 +385,17 @@ class FreshStaticFiles(StaticFiles):
 app.mount("/static", FreshStaticFiles(directory=WEB_DIR), name="static")
 
 
-# ---------------------------------------------------------------- AirDrop inbox
-
-def queue_new_videos(seen):
-    """Start finding shots for any video in data/ without results, once it has finished copying."""
-    now = time.time()
-    for video in video_files():
-        stem = video.stem
-        if stem in jobs or project.clips_path(stem).exists():
-            continue
-        st = video.stat()
-        sig = (st.st_size, st.st_mtime)
-        prev = seen.get(stem)
-        if not prev or prev[0] != sig:
-            seen[stem] = (sig, now)
-        elif now - prev[1] >= SETTLE_S:
-            print(f"  New video: {video.name}, finding shots")
-            start_detect(stem, video)
-
-
-def watch():
-    seen = {}
-    while True:
-        try:
-            for video in inbox.scan():
-                print(f"  AirDrop: moved {video.name} to data/")
-            queue_new_videos(seen)
-        except Exception:
-            traceback.print_exc()
-        time.sleep(3)
-
-
-# ---------------------------------------------------------------- startup
-
-def lan_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("10.255.255.255", 1))  # no packets sent; just picks the Wi-Fi interface
-        return s.getsockname()[0]
-    except OSError:
-        return None
-    finally:
-        s.close()
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--inbox", type=Path, default=DEFAULT_FOLDER,
-                   help="folder AirDrop saves to (default: ~/Downloads)")
     args = p.parse_args()
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found (brew install ffmpeg)")
-
-    global inbox
-    inbox = Inbox(args.inbox)
-    if inbox.error:
-        print(f"\n  Warning: {inbox.error}")
-    threading.Thread(target=watch, daemon=True).start()
-    print(f"\n  AirDrop videos to this Mac ({mac_name()}); new iPhone videos in {inbox.folder} move to data/.")
-
-    print(f"\n  On this Mac:  http://localhost:{args.port}")
-    ip = lan_ip()
-    if ip:
-        phone_url = f"http://{ip}:{args.port}/?key={KEY}"
-        print(f"  On your phone (same Wi-Fi): {phone_url}\n")
-        try:
-            import qrcode
-            qr = qrcode.QRCode(border=1)
-            qr.add_data(phone_url)
-            qr.print_ascii(invert=True)
-            print("  Scan with your iPhone camera.\n")
-        except ImportError:
-            pass
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+    paths.DATA_DIR.mkdir(exist_ok=True)
+    print(f"\n  Open http://localhost:{args.port}\n  Videos go in {paths.DATA_DIR}\n")
+    # restarts itself when the Python code changes (a plugin or export running then is stopped)
+    uvicorn.run("server:app", host="127.0.0.1", port=args.port, log_level="warning", reload=True,
+                reload_dirs=[str(paths.ROOT)], reload_excludes=[".venv/*", "data/*", "out/*", "exp/*"])
 
 
 if __name__ == "__main__":

@@ -3,4 +3,4 @@ numpy
 opencv-python
 fastapi
 uvicorn
-qrcode
+watchfiles

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Command-line version of the jumpshot trimmer (the web app is server.py).
+"""Command-line side of the app (the editor is server.py).
 
 Put videos in data/. Results go to out/<video name>/.
 
 Usage:
-    python cli.py detect IMG_1234.MOV    # pass 1: numbered review video
-    python cli.py trim IMG_1234 3,7      # pass 2: final video without clips 3 and 7
+    python cli.py detect IMG_1234.MOV points          # run a plugin; what it finds comes in as maybes
+    python cli.py detect IMG_1234.MOV serves --far-box 0.47,0.42,1,0.79
+    python cli.py list IMG_1234                       # annotations and their tags
+    python cli.py review IMG_1234                     # every annotation, labeled, in one video
+    python cli.py export IMG_1234                     # the confirmed annotations, clean
 """
 
 import argparse
@@ -14,94 +17,80 @@ import sys
 import time
 from pathlib import Path
 
-from trimmer import paths, project
-from trimmer.detect import DetectParams
-from trimmer.export import fmt_time, timeline
+from trimmer import paths, plugins, project
+from trimmer.export import fmt_time
 
 
-def print_clips(clips):
-    print("  clip  in video  in original")
-    for c in clips:
-        print(f"  {c['n']:>4}  {fmt_time(c['reel_start']):>8}  {fmt_time(c['start']):>11}"
-              f"{'  maybe' if c['maybe'] else ''}")
-
-
-def pose_progress():
+def progress_bar():
     started = time.time()
 
-    def report(done, total):
+    def report(frac):
         el = time.time() - started
-        print(f"\r  pose: {done}/{total} frames ({done / total:.0%}), "
-              f"~{el / done * (total - done):.0f}s left ", end="", flush=True)
+        left = f", ~{el / frac * (1 - frac):.0f}s left" if frac > 0.01 else ""
+        print(f"\r  progress: {frac:.0%}{left} ", end="", flush=True)
     return report
 
 
-def parse_clip_numbers(s):
-    """'3,7,10-12' -> {3, 7, 10, 11, 12}"""
-    nums = set()
-    for part in filter(None, (p.strip() for p in s.split(","))):
-        lo, _, hi = part.partition("-")
-        nums.update(range(int(lo), int(hi or lo) + 1))
-    return nums
+def export_progress(frac):
+    print(f"\r  exporting: {frac:.0%} ", end="\n" if frac >= 1 else "", flush=True)
+
+
+def print_annotations(anns):
+    print("  start    end      kind       status  tags")
+    for a in anns:
+        tags = ", ".join(f"{t['name']} {t['score']:g}" for t in a["tags"])
+        print(f"  {fmt_time(a['start']):>7}  {fmt_time(a['end']):>7}  {project.KIND_LABEL[a['kind']]:<9}  "
+              f"{'maybe' if a['maybe'] else '':<6}  {tags}")
 
 
 def cmd_detect(args):
     video = paths.find_video(args.video)
-    params = DetectParams(pre=args.pre, post=args.post, arm_up=args.arm_up, arm_peak=args.arm_peak,
-                          jump=args.jump, model=args.model, device=args.device,
-                          analysis_fps=args.analysis_fps, batch=args.batch)
-    print(f"Analyzing {video.name}...")
-    data, cached = project.detect(video, params, fresh=args.fresh, debug=args.debug, progress=pose_progress())
-    print("  used cached pose" if cached else "")
-    clips = timeline(data["clips"])
-    maybes = sum(c["maybe"] for c in clips)
-    print(f"Found {len(clips)} clips ({maybes} maybe).")
-    print_clips(clips)
-    if args.dry_run or not clips:
-        return
-    review = project.export_review(video.stem)
-    print(f"\nExported {review}\nWatch it, then drop clips with:\n"
-          f"  python cli.py trim {video.stem} <clip numbers, e.g. 3,7,10-12>")
+    options = {}
+    if args.far_box:
+        options["far_box"] = [float(v) for v in args.far_box.split(",")]
+    if args.tightness:
+        options["tightness"] = args.tightness
+    print(f"Running {plugins.get(args.plugin).label} on {video.name}...")
+    data, added = project.run_plugin(video, args.plugin, options, progress=progress_bar())
+    print(f"\nAdded {added} maybes.")
+    print_annotations([a for a in data["annotations"] if a["source"] == args.plugin])
 
 
-def cmd_trim(args):
-    stem = Path(args.name).stem
-    data = project.set_dropped(stem, args.drop)
-    kept = project.kept_clips(data)
-    print(f"Dropping {len(data['dropped'])} of {len(data['clips'])} clips -> {len(kept)} clips "
-          f"({kept[-1]['reel_end']:.1f}s)." if kept else "")
-    final, _ = project.export_final(stem)
-    print(f"Exported {final}")
+def cmd_list(args):
+    data = project.load(Path(args.name).stem)
+    print_annotations(data["annotations"])
+
+
+def cmd_review(args):
+    print(f"Exported {project.export_review(Path(args.name).stem, progress=export_progress)}")
+
+
+def cmd_export(args):
+    final, clips = project.export_final(Path(args.name).stem, progress=export_progress)
+    print(f"Exported {final} ({len(clips)} clips, {fmt_time(clips[-1]['reel_end'])})")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    defaults = DetectParams()
 
-    d = sub.add_parser("detect", help="pass 1: find shots and export a numbered review video")
+    d = sub.add_parser("detect", help="run a plugin; what it finds comes in as maybes")
     d.add_argument("video", type=Path, help="video file, or just its name if it's in data/")
-    d.add_argument("--pre", type=float, default=defaults.pre, help="seconds before gather")
-    d.add_argument("--post", type=float, default=defaults.post, help="seconds after release")
-    d.add_argument("--arm-up", type=float, default=defaults.arm_up,
-                   help="wrist height above shoulders (torso lengths) counted as arms up")
-    d.add_argument("--arm-peak", type=float, default=defaults.arm_peak,
-                   help="min wrist height above shoulders at release (torso lengths)")
-    d.add_argument("--jump", type=float, default=defaults.jump, help="min hip rise during the shot (torso lengths)")
-    d.add_argument("--model", default=defaults.model, help="ultralytics pose model")
-    d.add_argument("--device", default=None, help="mps, cpu, cuda (default: mps if available)")
-    d.add_argument("--analysis-fps", type=float, default=defaults.analysis_fps, help="frames/sec to run pose on")
-    d.add_argument("--batch", type=int, default=defaults.batch)
-    d.add_argument("--fresh", action="store_true", help="ignore cached pose and re-run it")
-    d.add_argument("--dry-run", action="store_true", help="list clips, skip the video export")
-    d.add_argument("--debug", action="store_true", help="also write per-frame signals CSV")
+    d.add_argument("plugin", choices=list(plugins.PLUGINS),
+                   help="; ".join(f"{p.name}: {p.about}" for p in plugins.PLUGINS.values()))
+    d.add_argument("--far-box", metavar="X0,Y0,X1,Y1",
+                   help="serves: box around the far baseline, as fractions of the frame, with room above "
+                        "the server for the toss, e.g. 0.47,0.42,1,0.79")
+    d.add_argument("--tightness", choices=list(plugins.PLUGINS["points"].choices["tightness"]),
+                   help="points: loose keeps the most of each point, tight cuts the most (default: loose)")
     d.set_defaults(func=cmd_detect)
 
-    t = sub.add_parser("trim", help="pass 2: export a final video without the clips you drop")
-    t.add_argument("name", help="video name, e.g. IMG_0121")
-    t.add_argument("drop", type=parse_clip_numbers, metavar="CLIPS",
-                   help="clip numbers from the review video to drop, e.g. 3,7,10-12")
-    t.set_defaults(func=cmd_trim)
+    for name, fn, about in (("list", cmd_list, "list a video's annotations"),
+                            ("review", cmd_review, "export every annotation, maybes too, labeled"),
+                            ("export", cmd_export, "export the confirmed annotations as one clean video")):
+        c = sub.add_parser(name, help=about)
+        c.add_argument("name", help="video name, e.g. IMG_0121")
+        c.set_defaults(func=fn)
 
     args = p.parse_args()
     if not shutil.which("ffmpeg"):

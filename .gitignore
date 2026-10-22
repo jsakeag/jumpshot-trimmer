@@ -3,5 +3,5 @@ __pycache__/
 *.pt
 data/
 out/
-.web_key
-.inbox_ignore.json
+.settings.json
+exp/
