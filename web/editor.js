@@ -25,7 +25,7 @@ const KEY_HELP = [
     ['T', 'Add a tag'], ['P', 'Play it'], ['⌫', 'Delete (again: the mark before)'], ['Esc', 'Deselect'], ['⌘Z / ⇧⌘Z', 'Undo / redo']]],
   ['Footwork (on a FH/BH)', [['D', 'Step tool: click to place steps, numbered'], ['⇧-click', 'A step landing with the previous one (hop): same number'], ['⌥-click', 'Where your feet were at the split step'],
     ['click / ⌫', 'Select a step, delete it (again: the one before)'], ['right-click', 'Remove one'], ['Esc', 'Put the tool down']]],
-  ['View', [['\\', 'Annotations panel'], ['= / − / 0', 'Zoom in / out / fit'], ['?', 'All keys']]],
+  ['View', [['\\', 'Annotations panel'], ['= / − / 0', 'Zoom in / out / fit'], ['pinch', 'Zoom the video; scroll to pan'], ['?', 'All keys']]],
 ];
 
 const keyTable = groups => groups.map(([title, rows]) => `
@@ -66,9 +66,10 @@ export function openEditor(app, stem, info) {
     rec: null,     // the mark key being held: {code, kind, start}
     marks: [],     // marks made by key, newest last, for Z: {id, at}
     undo: [], redo: [], lastKey: null, lastAt: 0,
-    f: { kinds: new Set(), tags: new Set(), mode: 'any', min: 0, sort: 'time', bad: false },
+    f: { kinds: new Set(), tags: new Set(), mode: 'any', min: 0, sort: 'time', bad: false, good: false },
     open: { confirmed: true, maybe: true },
     tool: null,    // 'point' while placing footwork steps on the video
+    vz: { s: 1, x: 0, y: 0 },  // video zoom: scale, and the picture's offset in the screen
     regionsOnly: false, loop: false, panel: store.get('panel', true),
     stopAt: null, wasPlaying: false, dirty: false, saving: false,
     job: null, final: null, vocab: { labels: [], steps: [], splits: [] }, listed: [], playlist: [], dim: new Set(),
@@ -78,7 +79,7 @@ export function openEditor(app, stem, info) {
 
   // this video's filter, Play only these and open sections, as left last time
   const view = store.get(`view.${stem}`, {});
-  Object.assign(S.f, { mode: view.mode || 'any', min: view.min || 0, sort: view.sort || 'time', bad: !!view.bad,
+  Object.assign(S.f, { mode: view.mode || 'any', min: view.min || 0, sort: view.sort || 'time', bad: !!view.bad, good: !!view.good,
     kinds: new Set(view.kinds || []), tags: new Set(view.tags || []) });
   Object.assign(S.open, view.open || {});
   S.regionsOnly = !!view.regionsOnly;
@@ -154,6 +155,7 @@ export function openEditor(app, stem, info) {
             <svg class="draw" id="draw"></svg>
             <div class="rec" id="rec" hidden></div>
             <div class="flash" id="flash" hidden></div>
+            <button class="vzoom" id="vzoom" title="Reset zoom" hidden></button>
           </div>
           <div class="scrubber" id="scrubber"><div class="regions" id="regions"></div><div class="played" id="played"></div></div>
           <div class="transport">
@@ -183,7 +185,6 @@ export function openEditor(app, stem, info) {
     vid.volume = store.get('volume', 1);
     vid.addEventListener('play', () => { $('#play').textContent = '❚❚'; });
     vid.addEventListener('pause', () => { $('#play').textContent = '▶'; });
-    vid.addEventListener('click', e => { if (!e.altKey) togglePlay(); });
     vid.addEventListener('error', () => flash('This browser can’t play this video. Try Safari or Chrome.', 0));
     vid.addEventListener('volumechange', () => { $('#mute').textContent = vid.muted || !vid.volume ? '🔇' : '🔊'; });
 
@@ -212,6 +213,7 @@ export function openEditor(app, stem, info) {
     });
 
     setupDrawing();
+    setupZoom();
     setupInspector();
     setupPanel();
 
@@ -231,6 +233,7 @@ export function openEditor(app, stem, info) {
         renderAll();
       },
     });
+    $('#timeline .tl-title').replaceWith($('.transport'));  // the player's controls share the timeline's bar
     loadMedia();
     renderAll();
     raf = requestAnimationFrame(tick);
@@ -245,7 +248,8 @@ export function openEditor(app, stem, info) {
         ? [...f.tags].every(n => a.tags.some(t => t.name === n))
         : a.tags.some(t => f.tags.has(t.name))))
       && (!f.min || (strength(a, f.tags) ?? -1) >= f.min)
-      && (!f.bad || badSteps(a) > 0);
+      && (!f.bad || badSteps(a) > 0)
+      && (!f.good || goodSteps(a) > 0);
     S.listed = S.anns.filter(passes);
     if (f.sort === 'strength') {
       S.listed.sort((a, b) => (strength(b, f.tags) ?? -1) - (strength(a, f.tags) ?? -1) || a.start - b.start);
@@ -356,9 +360,12 @@ export function openEditor(app, stem, info) {
       <p class="hint">Score how strongly each tag shows, 1–5.</p>`);
   }
 
-  // A step (or split-step foot) whose name is marked bad: one that ideally isn't needed.
-  const badStep = d => !!d.name && S.vocab[d.type === 'split' ? 'splits' : 'steps'].some(x => x.name === d.name && x.bad);
+  // A step (or split-step foot) whose name is marked bad (one that ideally isn't needed) or good.
+  const rated = (d, r) => !!d.name && S.vocab[d.type === 'split' ? 'splits' : 'steps'].some(x => x.name === d.name && x[r]);
+  const badStep = d => rated(d, 'bad'), goodStep = d => rated(d, 'good');
+  const stepMark = d => badStep(d) ? ' bad' : goodStep(d) ? ' good' : '';
   const badSteps = a => (a.drawings || []).filter(badStep).length;
+  const goodSteps = a => (a.drawings || []).filter(goodStep).length;
 
   // The stroke's steps as a numbered sequence, split-step feet first, each with a name.
   function footworkHTML(a) {
@@ -367,10 +374,10 @@ export function openEditor(app, stem, info) {
     return `<h3>Footwork</h3>
       ${ds.length ? `<ol class="steps-seq">${order.map(i => {
         const d = ds[i], split = d.type === 'split';
-        return `<li class="${split ? 'split' : ''}${d === S.step ? ' sel' : ''}${badStep(d) ? ' bad' : ''}" data-act="step" data-i="${i}">
+        return `<li class="${split ? 'split' : ''}${d === S.step ? ' sel' : ''}${stepMark(d)}" data-act="step" data-i="${i}">
           <span class="num" title="${split ? 'Split step' : d.tie ? 'Lands with the step before' : ''}">${split ? '' : nums[i]}</span>
           <button class="step-name${d.name ? ' lbl' : ''}" data-act="name-step" data-i="${i}"
-            ${d.name ? `style="--c:${colorOf(S.vocab[split ? 'splits' : 'steps'], d.name)}"` : ''}>${d.name ? `${badStep(d) ? '⚠ ' : ''}${esc(d.name)}` : split ? 'Split step…' : 'Name this step…'}</button>
+            ${d.name ? `style="--c:${colorOf(S.vocab[split ? 'splits' : 'steps'], d.name)}"` : ''}>${d.name ? `${badStep(d) ? '⚠ ' : goodStep(d) ? '✓ ' : ''}${esc(d.name)}` : split ? 'Split step…' : 'Name this step…'}</button>
           <button class="icon" data-act="unstep" data-i="${i}" title="Remove">×</button></li>`;
       }).join('')}</ol>` : ''}
       <p class="hint">D, then click on the video to add steps; ⇧-click for one landing with the previous (a hop);
@@ -413,8 +420,8 @@ export function openEditor(app, stem, info) {
       recolor: async (name, color) => { const list = await call('PATCH', { name, color }); renderAll(); return list; },
       rename: async (old, name) => { const list = await call('PATCH', { name: old, new_name: name }); renameHere(kind, old, name); return list; },
       remove: async name => { const list = await call('DELETE', null, `?name=${enc(name)}`); renameHere(kind, name, null); return list; },
-      ...(kind !== 'labels' && {  // step names can be marked bad: steps that ideally aren't needed
-        markBad: async (name, bad) => { const list = await call('PATCH', { name, bad }); S.drawKey = null; renderAll(); return list; },
+      ...(kind !== 'labels' && {  // step names can be marked bad (steps that ideally aren't needed) or good
+        rate: async (name, r) => { const list = await call('PATCH', { name, bad: r === 'bad', good: r === 'good' }); S.drawKey = null; renderAll(); return list; },
       }),
     };
   }
@@ -518,7 +525,7 @@ export function openEditor(app, stem, info) {
     const tags = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
     for (const t of f.tags) if (!counts[t]) f.tags.delete(t);
     const conf = S.listed.filter(a => !a.maybe), maybe = S.listed.filter(a => a.maybe);
-    const filtered = f.kinds.size || f.tags.size || f.min || f.bad;
+    const filtered = f.kinds.size || f.tags.size || f.min || f.bad || f.good;
     const showStrength = f.sort === 'strength' || f.tags.size;
     const row = a => {
       const k = KINDS[a.kind], s = strength(a, f.tags);
@@ -529,7 +536,8 @@ export function openEditor(app, stem, info) {
         <span class="acts">${a.maybe ? '<button class="icon" data-act="confirm" title="Confirm">✓</button>' : ''}<button class="icon" data-act="delete" title="Delete">×</button></span>
         ${a.tags.length ? `<span class="chips">${a.tags.map(t => `<span class="chip lbl${f.tags.has(t.name) ? ' on' : ''}" style="--c:${colorOf(S.vocab.labels, t.name)}">${esc(t.name)} <b>${t.score}</b></span>`).join('')}</span>` : ''}
         ${a.weak ? '<span class="chips"><span class="chip weak">weak</span></span>' : ''}
-        ${badSteps(a) ? `<span class="chips"><span class="chip badc" title="Steps marked bad">⚠ ${badSteps(a)} bad step${badSteps(a) === 1 ? '' : 's'}</span></span>` : ''}
+        ${badSteps(a) || goodSteps(a) ? `<span class="chips">${badSteps(a) ? `<span class="chip badc" title="Steps marked bad">⚠ ${badSteps(a)} bad step${badSteps(a) === 1 ? '' : 's'}</span>` : ''}${
+          goodSteps(a) ? `<span class="chip goodc" title="Steps marked good">✓ ${goodSteps(a)} good step${goodSteps(a) === 1 ? '' : 's'}</span>` : ''}</span>` : ''}
       </li>`;
     };
     setHTML(el, `
@@ -544,6 +552,7 @@ export function openEditor(app, stem, info) {
           ${f.tags.size > 1 ? `<div class="seg small"><button data-act="mode" data-mode="any" class="${f.mode === 'any' ? 'on' : ''}">Any</button><button data-act="mode" data-mode="all" class="${f.mode === 'all' ? 'on' : ''}">All</button></div>` : ''}
           <label class="flabel">Min <input type="number" min="1" max="5" step="1" value="${f.min || ''}" placeholder="–" data-act="min" data-fk="min"></label>
           <button class="chip badf${f.bad ? ' on' : ''}" data-act="bad" title="Only strokes with steps marked bad">⚠ Bad steps</button>
+          <button class="chip goodf${f.good ? ' on' : ''}" data-act="good" title="Only strokes with steps marked good">✓ Good steps</button>
           <div class="seg small"><button data-act="sort" data-sort="time" class="${f.sort === 'time' ? 'on' : ''}">By time</button><button data-act="sort" data-sort="strength" class="${f.sort === 'strength' ? 'on' : ''}">By strength</button></div>
           ${filtered ? '<button class="link" data-act="clear">Clear</button>' : ''}
         </div>
@@ -571,8 +580,8 @@ export function openEditor(app, stem, info) {
           close: togglePanel,
           kind: () => toggle(f.kinds, b.dataset.kind), tag: () => toggle(f.tags, b.dataset.tag),
           mode: () => { f.mode = b.dataset.mode; }, sort: () => { f.sort = b.dataset.sort; },
-          clear: () => { f.kinds.clear(); f.tags.clear(); f.min = 0; f.bad = false; },
-          bad: () => { f.bad = !f.bad; },
+          clear: () => { f.kinds.clear(); f.tags.clear(); f.min = 0; f.bad = false; f.good = false; },
+          bad: () => { f.bad = !f.bad; }, good: () => { f.good = !f.good; },
           confirm: () => change(() => { S.anns.find(a => a.id === id).maybe = false; }),
           delete: () => removeAnn(id),
           'confirm-all': () => {
@@ -798,10 +807,12 @@ export function openEditor(app, stem, info) {
     const target = S.tool ? drawTarget() : strokeAt(vid.currentTime);
     const shown = target?.drawings?.length ? [target] : [];
     const p = picture();
-    const key = JSON.stringify([shown.map(a => [a.id, a.drawings, a.drawings.indexOf(S.step)]), p, S.tool]);
+    const z = S.vz;
+    const key = JSON.stringify([shown.map(a => [a.id, a.drawings, a.drawings.indexOf(S.step)]), p, z, S.tool]);
     if (key === S.drawKey) return;
     S.drawKey = key;
-    const X = x => p.x + x * p.w, Y = y => p.y + y * p.h;
+    // the overlay isn't zoomed with the video, so the marks keep their size
+    const X = x => z.x + z.s * (p.x + x * p.w), Y = y => z.y + z.s * (p.y + y * p.h);
     let html = '';
     for (const a of shown) {
       const nums = stepNumbers(a.drawings);
@@ -814,9 +825,9 @@ export function openEditor(app, stem, info) {
           last = d;
         }
         const title = `<title>${esc(d.type === 'split' ? `Split step${d.name ? `: ${d.name}` : ''}` : `${nums[i]}${d.name ? `. ${d.name}` : ''}`)}</title>`;
-        const bad = badStep(d) ? ' bad' : '';
-        if (d.type === 'split') html += `<g class="split${bad}" ${data}>${title}<circle class="hit" cx="${X(d.x)}" cy="${Y(d.y)}" r="10"/><circle cx="${X(d.x)}" cy="${Y(d.y)}" r="4.5"/><circle class="dot" cx="${X(d.x)}" cy="${Y(d.y)}" r="1.2"/></g>`;
-        else html += `<g class="point${bad}" ${data}>${title}<circle class="hit" cx="${X(d.x)}" cy="${Y(d.y)}" r="10"/><circle cx="${X(d.x)}" cy="${Y(d.y)}" r="5"/><text x="${X(d.x)}" y="${Y(d.y)}">${nums[i]}</text></g>`;
+        const mark = stepMark(d);
+        if (d.type === 'split') html += `<g class="split${mark}" ${data}>${title}<circle class="hit" cx="${X(d.x)}" cy="${Y(d.y)}" r="10"/><circle cx="${X(d.x)}" cy="${Y(d.y)}" r="4.5"/><circle class="dot" cx="${X(d.x)}" cy="${Y(d.y)}" r="1.2"/></g>`;
+        else html += `<g class="point${mark}" ${data}>${title}<circle class="hit" cx="${X(d.x)}" cy="${Y(d.y)}" r="10"/><circle cx="${X(d.x)}" cy="${Y(d.y)}" r="5"/><text x="${X(d.x)}" y="${Y(d.y)}">${nums[i]}</text></g>`;
       });
       html = ties + html;
     }
@@ -828,7 +839,7 @@ export function openEditor(app, stem, info) {
     const at = e => {
       const r = vid.getBoundingClientRect(), p = picture();
       const f = v => Math.round(clamp(v, 0, 1) * 10000) / 10000;
-      return [f((e.clientX - r.left - p.x) / p.w), f((e.clientY - r.top - p.y) / p.h)];
+      return [f(((e.clientX - r.left) / S.vz.s - p.x) / p.w), f(((e.clientY - r.top) / S.vz.s - p.y) / p.h)];
     };
     const add = d => {
       const a = drawTarget();
@@ -884,6 +895,61 @@ export function openEditor(app, stem, info) {
       if (a) change(() => { a.drawings = a.drawings.filter((_, k) => k !== i); });
     });
     new ResizeObserver(() => { S.drawKey = null; }).observe(vid);
+  }
+
+  // Pinch (or ⌘/ctrl-scroll) on the video zooms it within its frame instead of zooming the page;
+  // dragging or two-finger scroll pans while zoomed. The video is scaled from its top-left corner.
+  function setupZoom() {
+    const screen = $('#screen'), badge = $('#vzoom');
+    const apply = () => {
+      const z = S.vz, w = screen.clientWidth, h = screen.clientHeight;
+      z.x = clamp(z.x, w - w * z.s, 0);
+      z.y = clamp(z.y, h - h * z.s, 0);
+      vid.style.transform = z.s > 1 ? `translate(${z.x}px, ${z.y}px) scale(${z.s})` : '';
+      screen.classList.toggle('zoomed', z.s > 1);
+      badge.hidden = z.s <= 1;
+      badge.textContent = `${z.s.toFixed(1)}×`;
+    };
+    const zoomAt = (s, clientX, clientY) => {
+      const r = screen.getBoundingClientRect(), z = S.vz, px = clientX - r.left, py = clientY - r.top;
+      const f = clamp(s, 1, 8) / z.s;
+      z.x = px - (px - z.x) * f;
+      z.y = py - (py - z.y) * f;
+      z.s *= f;
+      apply();
+    };
+    screen.addEventListener('wheel', e => {
+      if (e.ctrlKey || e.metaKey) zoomAt(S.vz.s * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);  // trackpad pinch arrives as ctrl+wheel
+      else if (S.vz.s > 1) { S.vz.x -= e.deltaX; S.vz.y -= e.deltaY; apply(); }
+      else return;
+      e.preventDefault();
+    }, { passive: false });
+    // Safari sends pinches as gesture events instead
+    let s0 = 1;
+    screen.addEventListener('gesturestart', e => { e.preventDefault(); s0 = S.vz.s; });
+    screen.addEventListener('gesturechange', e => { e.preventDefault(); zoomAt(s0 * e.scale, e.clientX, e.clientY); });
+    screen.addEventListener('gestureend', e => e.preventDefault());
+    // the drawing handlers run first (capture) and claim their own clicks
+    screen.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || e.target !== vid || S.vz.s <= 1) return;
+      e.preventDefault();
+      let lx = e.clientX, ly = e.clientY;
+      screen.classList.add('panning');
+      const move = ev => {
+        S.vz.x += ev.clientX - lx;
+        S.vz.y += ev.clientY - ly;
+        lx = ev.clientX;
+        ly = ev.clientY;
+        apply();
+      };
+      addEventListener('pointermove', move);
+      addEventListener('pointerup', () => {
+        removeEventListener('pointermove', move);
+        screen.classList.remove('panning');
+      }, { once: true });
+    });
+    badge.addEventListener('click', () => { S.vz = { s: 1, x: 0, y: 0 }; apply(); badge.blur(); });
+    new ResizeObserver(apply).observe(screen);
   }
 
   // ---------------------------------------------------------------- playback

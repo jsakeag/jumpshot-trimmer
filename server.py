@@ -167,7 +167,7 @@ def clean_name(name):
 def vocab(kind):
     """The names to pick from for tags (labels) or steps: every one created or used in any video,
     most used first, with how often each is used, its color (if one was picked) and whether it's
-    marked bad (a step that ideally isn't needed)."""
+    marked bad (a step that ideally isn't needed) or good."""
     settings = load_settings()
     counts = {name: 0 for name in settings.get(kind, [])}
     for p in paths.OUT_DIR.glob("*/project.json") if paths.OUT_DIR.exists() else []:
@@ -176,17 +176,20 @@ def vocab(kind):
                 counts[name] = counts.get(name, 0) + 1
     colors = settings.get("colors", {}).get(kind, {})
     bad = set(settings.get("bad", {}).get(kind, []))
-    return [{"name": n, "count": counts[n], "color": colors.get(n), "bad": n in bad}
+    good = set(settings.get("good", {}).get(kind, []))
+    return [{"name": n, "count": counts[n], "color": colors.get(n), "bad": n in bad, "good": n in good}
             for n in sorted(counts, key=lambda k: (-counts[k], k.lower()))]
 
 
 def save_vocab(kind, update):
-    """update(names, colors, bad) changes this kind's saved names, colors and bad names in place."""
+    """update(names, colors, bad, good) changes this kind's saved names, colors, and bad and good
+    names in place."""
     settings = load_settings()
     names = settings.get(kind, [])
     colors = settings.setdefault("colors", {}).setdefault(kind, {})
     bad = settings.setdefault("bad", {}).setdefault(kind, [])
-    update(names, colors, bad)
+    good = settings.setdefault("good", {}).setdefault(kind, [])
+    update(names, colors, bad, good)
     settings[kind] = names
     SETTINGS_FILE.write_text(json.dumps(settings))
 
@@ -206,7 +209,7 @@ def add_to_vocab(kind: str, body: Name):
     """Add a name to pick from, before anything uses it."""
     check_kind(kind)
     name = clean_name(body.name)
-    save_vocab(kind, lambda names, colors, bad: None if any(n.lower() == name.lower() for n in names) else names.append(name))
+    save_vocab(kind, lambda names, colors, bad, good: None if any(n.lower() == name.lower() for n in names) else names.append(name))
     return vocab(kind)
 
 
@@ -215,18 +218,21 @@ class NameChange(BaseModel):
     new_name: str | None = None
     color: str | None = None
     bad: bool | None = None
+    good: bool | None = None
 
 
 @app.patch("/api/vocab/{kind}")
 def change_vocab(kind: str, body: NameChange):
     """Rename a name everywhere it's used (into another existing name merges them), set its color,
-    or mark it bad or not."""
+    or mark it bad or good or neither."""
     check_kind(kind)
     if body.color is not None:
-        save_vocab(kind, lambda names, colors, bad: colors.__setitem__(body.name, body.color[:20]))
-    if body.bad is not None:
-        def mark(names, colors, bad):
-            bad[:] = [n for n in bad if n != body.name] + ([body.name] if body.bad else [])
+        save_vocab(kind, lambda names, colors, bad, good: colors.__setitem__(body.name, body.color[:20]))
+    if body.bad is not None or body.good is not None:
+        def mark(names, colors, bad, good):
+            for marked, on in ((bad, body.bad), (good, body.good)):
+                if on is not None:
+                    marked[:] = [n for n in marked if n != body.name] + ([body.name] if on else [])
             if body.name not in names:  # keep it listed even if nothing uses it any more
                 names.append(body.name)
         save_vocab(kind, mark)
@@ -235,12 +241,13 @@ def change_vocab(kind: str, body: NameChange):
         if new != body.name:
             project.rename_everywhere(kind, body.name, new)
 
-            def update(names, colors, bad):
+            def update(names, colors, bad, good):
                 names[:] = [new if n == body.name else n for n in names if n != new] + ([] if body.name in names else [new])
                 if body.name in colors:
                     colors.setdefault(new, colors.pop(body.name))
-                if body.name in bad:
-                    bad[:] = [n for n in bad if n not in (body.name, new)] + [new]
+                for marked in (bad, good):
+                    if body.name in marked:
+                        marked[:] = [n for n in marked if n not in (body.name, new)] + [new]
             save_vocab(kind, update)
     return vocab(kind)
 
@@ -251,10 +258,11 @@ def delete_from_vocab(kind: str, name: str):
     check_kind(kind)
     project.rename_everywhere(kind, name, None)
 
-    def update(names, colors, bad):
+    def update(names, colors, bad, good):
         names[:] = [n for n in names if n != name]
         colors.pop(name, None)
         bad[:] = [n for n in bad if n != name]
+        good[:] = [n for n in good if n != name]
     save_vocab(kind, update)
     return vocab(kind)
 

@@ -19,7 +19,7 @@ let open = null;  // the picker on screen, if any
  * deleted, which the callbacks do everywhere and answer with the new list.
  *   list: [{name, count, color}]   current: the name picked now, if any   exclude: names to leave out
  *   pick(name), with null for "none" when noneLabel is given
- *   create(name), rename(old, new), recolor(name, color), remove(name), and if given markBad(name, bad):
+ *   create(name), rename(old, new), recolor(name, color), remove(name), and if given rate(name, 'bad' | 'good' | null):
  *   each resolves to the new list
  */
 export function openPicker(anchor, opts) {
@@ -28,7 +28,7 @@ export function openPicker(anchor, opts) {
   const el = document.createElement('div');
   el.className = 'picker';
   el.innerHTML = `<input class="search" placeholder="${esc(opts.placeholder || 'Search or create…')}" spellcheck="false">
-    <ul></ul><p class="foot">↑↓ ↵ pick · click a dot to recolor${opts.markBad ? ' · ⚠ bad' : ''} · ✎ rename · × delete</p>`;
+    <ul></ul><p class="foot">↑↓ ↵ pick · click a dot to recolor${opts.rate ? ' · ⚠ bad, again ✓ good' : ''} · ✎ rename · × delete</p>`;
   document.body.appendChild(el);
   const search = el.querySelector('input'), ul = el.querySelector('ul');
 
@@ -64,10 +64,12 @@ export function openPicker(anchor, opts) {
       if (editing === x.name) {
         return `<li class="${cls} editing" data-i="${i}"><input class="rename" value="${esc(x.name)}" spellcheck="false"></li>`;
       }
-      return `<li class="${cls}${x.name === opts.current ? ' cur' : ''}${x.bad ? ' bad' : ''}" data-i="${i}" style="--c:${c}">
+      const mark = x.bad ? '⚠ ' : x.good ? '✓ ' : '';
+      return `<li class="${cls}${x.name === opts.current ? ' cur' : ''}${x.bad ? ' bad' : ''}${x.good ? ' good' : ''}" data-i="${i}" style="--c:${c}">
         <button class="dot" data-a="color" title="Change color"></button>
-        <span class="pchip">${x.bad ? '⚠ ' : ''}${esc(x.name)}</span><span class="count">${x.count || ''}</span>
-        ${opts.markBad ? `<button class="pa${x.bad ? ' on' : ''}" data-a="bad" title="${x.bad ? 'Bad: ideally not needed. Click to unmark' : 'Mark as bad (ideally not needed)'}">⚠</button>` : ''}
+        <span class="pchip">${mark}${esc(x.name)}</span><span class="count">${x.count || ''}</span>
+        ${opts.rate ? `<button class="pa rate${x.bad ? ' on' : x.good ? ' on good' : ''}" data-a="rate" title="${
+          x.bad ? 'Bad: ideally not needed. Click to mark good' : x.good ? 'Good. Click to unmark' : 'Mark as bad (ideally not needed); click again for good'}">${x.good ? '✓' : '⚠'}</button>` : ''}
         <button class="pa" data-a="rename" title="Rename everywhere">✎</button>
         <button class="pa" data-a="delete" title="Delete everywhere">×</button></li>`;
     }).join('') || '<li class="empty">Nothing yet: type a name to create one</li>';
@@ -112,8 +114,8 @@ export function openPicker(anchor, opts) {
     const x = rows()[Number(li.dataset.i)], a = e.target.closest('[data-a]')?.dataset.a;
     if (!a) return choose(x);
     if (a === 'rename') { editing = x.name; return render(); }
-    if (a === 'bad') {
-      try { list = await opts.markBad(x.name, !x.bad); } catch (err) { fail(err); }
+    if (a === 'rate') {  // neither → bad → good → neither
+      try { list = await opts.rate(x.name, x.bad ? 'good' : x.good ? null : 'bad'); } catch (err) { fail(err); }
       return render();
     }
     if (a === 'color') {

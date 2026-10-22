@@ -187,7 +187,10 @@ input[type=range] { accent-color: var(--accent); }
 /* preview */
 .preview { grid-area: prev; display: flex; flex-direction: column; min-height: 0; background: #000; }
 .screen { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #000; }
-.screen video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.screen video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; transform-origin: 0 0; }
+.screen.zoomed video { cursor: grab; }
+.screen.panning video { cursor: grabbing; }
+.vzoom { position: absolute; top: 8px; right: 8px; z-index: 4; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: rgba(0, 0, 0, .6); color: var(--text); font-size: 12px; cursor: pointer; }
 .draw { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; --draw: #ffd43b; }
 .screen.drawing .draw { pointer-events: auto; cursor: crosshair; }
 .screen.drawing { box-shadow: inset 0 0 0 2px var(--draw, #ffd43b); }
@@ -199,6 +202,9 @@ input[type=range] { accent-color: var(--accent); }
 .draw .point.bad circle:not(.hit) { fill: var(--danger); }
 .draw .split.bad circle { stroke: var(--danger); }
 .draw .split.bad .dot { fill: var(--danger); }
+.draw .point.good circle:not(.hit) { fill: var(--ok); }
+.draw .split.good circle { stroke: var(--ok); }
+.draw .split.good .dot { fill: var(--ok); }
 .draw text { fill: #111; font: 700 7px -apple-system, system-ui, sans-serif; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
 .draw g { pointer-events: auto; cursor: move; }
 .draw .hit, .draw .split .hit { fill: transparent; stroke: none; }
@@ -277,10 +283,17 @@ input[type=range] { accent-color: var(--accent); }
 .steps-seq li.bad .num { background: var(--danger); color: #fff; }
 .steps-seq li.split.bad .num { border-color: var(--danger); box-shadow: inset 0 0 0 5px var(--panel), inset 0 0 0 8px var(--danger); background: var(--panel); }
 .steps-seq li.bad .step-name { box-shadow: 0 0 0 1px var(--danger); }
+.steps-seq li.good .num { background: var(--ok); color: #111; }
+.steps-seq li.split.good .num { border-color: var(--ok); box-shadow: inset 0 0 0 5px var(--panel), inset 0 0 0 8px var(--ok); background: var(--panel); }
+.steps-seq li.good .step-name { box-shadow: 0 0 0 1px var(--ok); }
 .chip.badc { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 60%, transparent); }
 .chip.badf { --c: var(--danger); }
+.chip.goodc { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 60%, transparent); }
+.chip.goodf { --c: var(--ok); }
 .picker .opt.bad .pchip { box-shadow: inset 0 0 0 1px var(--danger); }
+.picker .opt.good .pchip { box-shadow: inset 0 0 0 1px var(--ok); }
 .picker .pa.on { color: var(--danger); opacity: 1; }
+.picker .pa.on.good { color: var(--ok); font-weight: 700; }
 hr.sep { border: 0; border-top: 1px solid var(--line); margin: 14px 0 0; }
 .tag-edit { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .tag-edit li { display: grid; grid-template-columns: minmax(0, 1fr) 70px 54px 24px; gap: 6px; align-items: center; }
@@ -377,6 +390,8 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 14px 0 0; }
 .timeline { grid-area: tl; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--line); background: var(--panel); }
 .tl-bar { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-bottom: 1px solid var(--line); }
 .tl-title { font-weight: 600; font-size: 12px; }
+.tl-bar .transport { flex: 1; min-width: 0; padding: 0; border: 0; background: none; }
+.tl-bar > .grow { display: none; }  /* the transport's own spacer pushes the rest right */
 .tl-zoom { width: 140px; }
 .tl-scroll { position: relative; flex: 1; overflow: auto; background: var(--bg); --muted: #8e8d94; --line: #34343a; --track: #121214; --wave: #5fb3a3; }
 .tl-inner { position: relative; min-height: 100%; }
