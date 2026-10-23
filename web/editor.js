@@ -50,6 +50,17 @@ function stepNumbers(drawings) {
   return drawings.map(d => d.type !== 'point' ? null : d.tie && n ? n : ++n);
 }
 
+// The steps by number, as lists of indices into drawings: a step and any tied to it, which share a name.
+function stepGroups(drawings) {
+  const gs = [];
+  drawings.forEach((d, i) => {
+    if (d.type !== 'point') return;
+    if (d.tie && gs.length) gs.at(-1).push(i);
+    else gs.push([i]);
+  });
+  return gs;
+}
+
 // Replace el's contents, keeping focus (and a half-typed value) in the field marked data-fk.
 function setHTML(el, html) {
   const a = document.activeElement, fk = el.contains(a) ? a.dataset.fk : null;
@@ -375,7 +386,7 @@ export function openEditor(app, stem, info) {
       ${ds.length ? `<ol class="steps-seq">${order.map(i => {
         const d = ds[i], split = d.type === 'split';
         return `<li class="${split ? 'split' : ''}${d === S.step ? ' sel' : ''}${stepMark(d)}" data-act="step" data-i="${i}">
-          <span class="num" title="${split ? 'Split step' : d.tie ? 'Lands with the step before' : ''}">${split ? '' : nums[i]}</span>
+          <span class="num" title="${split ? 'Split step' : `${d.tie ? 'Lands with the step before. ' : ''}Drag to reorder`}">${split ? '' : nums[i]}</span>
           <button class="step-name${d.name ? ' lbl' : ''}" data-act="name-step" data-i="${i}"
             ${d.name ? `style="--c:${colorOf(S.vocab[split ? 'splits' : 'steps'], d.name)}"` : ''}>${d.name ? `${badStep(d) ? '⚠ ' : goodStep(d) ? '✓ ' : ''}${esc(d.name)}` : split ? 'Split step…' : 'Name this step…'}</button>
           <button class="icon" data-act="unstep" data-i="${i}" title="Remove">×</button></li>`;
@@ -469,11 +480,13 @@ export function openEditor(app, stem, info) {
         'add-label': () => pickLabel(b),
         'name-step': () => {
           const d = a.drawings[i], kind = d.type === 'split' ? 'splits' : 'steps';  // split-step feet have their own names
+          // tied steps share their name
+          const named = d.type === 'point' ? stepGroups(a.drawings).find(g => g.includes(i)).map(k => a.drawings[k]) : [d];
           if (S.step !== d) selectStep(d);
           openPicker($(`#inspector [data-act=name-step][data-i="${i}"]`) || b, {
             list: S.vocab[kind], current: d.name, noneLabel: 'No name',
             placeholder: kind === 'splits' ? 'Search or create a split-step name…' : 'Search or create a step name…',
-            pick: name => change(() => { if (name) d.name = name; else delete d.name; }), ...vocabOps(kind),
+            pick: name => change(() => { for (const x of named) if (name) x.name = name; else delete x.name; }), ...vocabOps(kind),
           });
         },
         unstep: () => {
@@ -482,6 +495,41 @@ export function openEditor(app, stem, info) {
         },
       })[b.dataset.act]?.();
       b.blur();
+    });
+    // Drag a step's number to reorder the steps; tied steps move together.
+    el.addEventListener('pointerdown', e => {
+      const num = e.target.closest('.steps-seq li:not(.split) .num'), a = selected();
+      if (!num || !a || e.button !== 0) return;
+      e.preventDefault();
+      const held = a.drawings[Number(num.closest('li').dataset.i)];
+      const span = g => {
+        const rs = g.map(k => el.querySelector(`.steps-seq li[data-i="${k}"]`).getBoundingClientRect());
+        return { top: rs[0].top, bottom: rs.at(-1).bottom };
+      };
+      let moved = false;
+      el.classList.add('reordering');
+      const move = ev => {
+        const ds = a.drawings, gs = stepGroups(ds), from = gs.findIndex(g => g.some(k => ds[k] === held));
+        if (from < 0) return;
+        // swap with a neighbor only once the pointer would land inside the moved group, so it can't flip back
+        const own = span(gs[from]), next = gs[from + 1] && span(gs[from + 1]), prev = gs[from - 1] && span(gs[from - 1]);
+        const to = next && ev.clientY >= own.top + next.bottom - own.bottom ? from + 1
+          : prev && ev.clientY < own.bottom - (own.top - prev.top) ? from - 1 : from;
+        if (to === from) return;
+        if (!moved) { pushUndo(); moved = true; }
+        const order = gs.map(g => g.map(k => ds[k]));
+        order.splice(to, 0, ...order.splice(from, 1));
+        for (const g of order) delete g[0].tie;
+        a.drawings = [...ds.filter(d => d.type !== 'point'), ...order.flat()];
+        S.drawKey = null;
+        renderAll();
+      };
+      addEventListener('pointermove', move);
+      addEventListener('pointerup', () => {
+        removeEventListener('pointermove', move);
+        el.classList.remove('reordering');
+        if (moved) scheduleSave();
+      }, { once: true });
     });
     el.addEventListener('input', e => {
       if (e.target.dataset.act === 'score' && /^[1-5]$/.test(e.target.value)) return e.target.blur();  // one digit is a whole score: save it
@@ -845,6 +893,8 @@ export function openEditor(app, stem, info) {
       const a = drawTarget();
       if (!a) return flash('Footwork goes on a forehand or backhand: move into one');
       if (S.sel !== a.id) S.sel = a.id;
+      if (d.tie) d.name = (a.drawings || []).filter(x => x.type === 'point').at(-1)?.name;  // lands with it, so shares its name
+      if (!d.name) delete d.name;
       change(() => {
         let ds = [...(a.drawings || []), d];
         const splits = ds.filter(x => x.type === 'split');
