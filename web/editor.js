@@ -1,6 +1,7 @@
 import { $, KINDS, MARK_KEYS, VOLLEY, api, clamp, enc, esc, fmt, jobRunning, jobText, parseTime, strength } from './util.js';
 import { Timeline } from './timeline.js';
 import { colorOf, openPicker } from './picker.js';
+import { ballTool } from './ball.js';
 
 const TAP_BEFORE = 1.0, TAP_AFTER = 0.5;  // a tapped mark key marks this window around where it went down
 const MIN_HOLD = 0.3;                      // seconds of video a held key must cover, else it counts as a tap
@@ -25,6 +26,8 @@ const KEY_HELP = [
     ['T', 'Add a tag'], ['P', 'Play it'], ['⌫', 'Delete (again: the mark before)'], ['Esc', 'Deselect'], ['⌘Z / ⇧⌘Z', 'Undo / redo']]],
   ['Footwork (on a FH/BH)', [['D', 'Step tool: click to place steps, numbered'], ['⇧-click', 'A step landing with the previous one (hop): same number'], ['⌥-click', 'Where your feet were at the split step'],
     ['click / ⌫', 'Select a step, delete it (again: the one before)'], ['right-click', 'Remove one'], ['Esc', 'Put the tool down']]],
+  ['Ball (experimental)', [['G', 'Ball tool: the court’s corners once, then the ball frame by frame'], ['click', 'The ball on this frame'],
+    ['⇧-click / ⌥-click', 'It bounces / the racket hits it here'], ['N', 'New track'], ['[ ]', 'Previous / next track']]],
   ['View', [['\\', 'Annotations panel'], ['= / − / 0', 'Zoom in / out / fit'], ['pinch', 'Zoom the video; scroll to pan'], ['?', 'All keys']]],
 ];
 
@@ -86,7 +89,7 @@ export function openEditor(app, stem, info) {
     job: null, final: null, vocab: { labels: [], steps: [], splits: [] }, listed: [], playlist: [], dim: new Set(),
   };
   let alive = true, raf = null, saveTimer = null, pollTimer = null, mediaTimer = null, flashTimer = null;
-  let vid = null, tl = null, dur = 0;
+  let vid = null, tl = null, ball = null, dur = 0;
 
   // this video's filter, Play only these and open sections, as left last time
   const view = store.get(`view.${stem}`, {});
@@ -140,6 +143,7 @@ export function openEditor(app, stem, info) {
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('keyup', onKeyUp);
     if (S.dirty) saveNow();
+    ball?.close();
     if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
   };
 
@@ -153,6 +157,7 @@ export function openEditor(app, stem, info) {
           <h1>${esc(S.v.name)}</h1>
           <span class="meta" id="save-state"></span>
           <span class="grow"></span>
+          <span class="seg small" id="view-tabs"><button data-view="video" class="on">Video</button><button data-view="3d" title="The ball’s flight in 3D (experimental)">3D β</button></span>
           <span class="job" id="job"></span>
           <button class="btn" id="plugins-btn">Plugins…</button>
           <span class="export" id="export"></span>
@@ -161,13 +166,16 @@ export function openEditor(app, stem, info) {
         </header>
         <aside class="inspector" id="inspector"></aside>
         <section class="preview">
+          <div class="ballbar" id="ballbar" hidden></div>
           <div class="screen" id="screen">
             <video id="vid" preload="auto" playsinline src="${base}/source"></video>
             <svg class="draw" id="draw"></svg>
+            <svg class="ballsvg" id="ball"></svg>
             <div class="rec" id="rec" hidden></div>
             <div class="flash" id="flash" hidden></div>
             <button class="vzoom" id="vzoom" title="Reset zoom" hidden></button>
           </div>
+          <div class="court3d" id="court3d" hidden></div>
           <div class="scrubber" id="scrubber"><div class="regions" id="regions"></div><div class="played" id="played"></div></div>
           <div class="transport">
             <button class="icon" data-t="prev" title="Previous annotation (↑)">⏮</button>
@@ -181,7 +189,7 @@ export function openEditor(app, stem, info) {
             <select id="speed" title="Speed">${SPEEDS.map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
             <button class="icon" data-t="mute" id="mute" title="Mute (M)">🔊</button>
             <input type="range" id="volume" min="0" max="1" step="0.05" value="${store.get('volume', 1)}" aria-label="Volume">
-            <span class="seg tools"><button data-t="point" title="Step tool: place footwork steps (D). ⌥-click anytime: split-step feet">• Steps</button></span>
+            <span class="seg tools"><button data-t="point" title="Step tool: place footwork steps (D). ⌥-click anytime: split-step feet">• Steps</button><button data-t="ball" title="Ball tool, experimental (G): the court’s corners, then the ball frame by frame">◎ Ball β</button></span>
             <button class="icon" data-t="full" title="Full screen">⛶</button>
           </div>
         </section>
@@ -204,7 +212,7 @@ export function openEditor(app, stem, info) {
       ({
         prev: () => neighbor(-1), next: () => neighbor(1), back: () => stepFrame(-1), fwd: () => stepFrame(1),
         play: togglePlay, mute: () => { vid.muted = !vid.muted; },
-        point: () => setTool('point'),
+        point: () => setTool('point'), ball: toggleBall,
         full: () => document.fullscreenElement ? document.exitFullscreen() : $('#screen').requestFullscreen?.(),
       })[t]?.();
       if (t) e.target.blur();  // so Space doesn't also press the button
@@ -225,6 +233,14 @@ export function openEditor(app, stem, info) {
 
     setupDrawing();
     setupZoom();
+    ball = ballTool({
+      base, vid, screen: $('#screen'), svg: $('#ball'), bar: $('#ballbar'), view: $('#court3d'), tabs: $('#view-tabs'),
+      layout: () => ({ p: picture(), z: S.vz }), fps: () => S.v.fps || 30, flash, seek, onMode: () => toolButtons(),
+    });
+    $('#view-tabs').addEventListener('click', e => {
+      const b = e.target.closest('[data-view]');
+      if (b) { if (b.dataset.view === '3d') setTool(null); ball.setView(b.dataset.view); b.blur(); }
+    });
     setupInspector();
     setupPanel();
 
@@ -832,6 +848,7 @@ export function openEditor(app, stem, info) {
 
   function setTool(tool) {
     S.tool = S.tool === tool ? null : tool;
+    if (S.tool) ball.off();
     if (S.tool) {
       vid.pause();
       const a = drawTarget();
@@ -840,9 +857,18 @@ export function openEditor(app, stem, info) {
       if (S.tool) flash(`Click to place steps on ${KINDS[a.kind].label} · ⇧-click: lands with the previous · ⌥-click for split-step feet · Esc when done`, 2500);
     }
     $('#screen').classList.toggle('drawing', !!S.tool);
-    document.querySelectorAll('.tools [data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === S.tool));
     S.drawKey = null;
+    toolButtons();
   }
+
+  // The ball tool (experimental, ball.js) takes over clicks on the video while it's on.
+  function toggleBall() {
+    if (S.tool) setTool(null);
+    ball.toggle();
+  }
+
+  const toolButtons = () => document.querySelectorAll('.tools [data-t]').forEach(b =>
+    b.classList.toggle('on', b.dataset.t === S.tool || (b.dataset.t === 'ball' && ball.active())));
 
   // Where the picture sits inside the video element (letterboxed by object-fit: contain).
   function picture() {
@@ -922,6 +948,7 @@ export function openEditor(app, stem, info) {
     };
     // ⌥-click, tool or not: a foot at the split step. With the step tool: a step.
     $('#screen').addEventListener('pointerdown', e => {
+      if (ball.active()) return;
       const g = e.target.closest('#draw [data-ann]');
       if (g && e.button === 0 && !e.altKey) {
         e.preventDefault();
@@ -1084,6 +1111,7 @@ export function openEditor(app, stem, info) {
     if (S.rec) renderTimeline();
     followPlayhead(t);
     renderDrawings();
+    ball.render(t);
     raf = requestAnimationFrame(tick);
   }
 
@@ -1134,7 +1162,8 @@ export function openEditor(app, stem, info) {
     if (e.metaKey || e.ctrlKey) {
       if (e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        if (e.shiftKey) undoRedo(S.redo, S.undo, 'redo');
+        if (ball.active() && !e.shiftKey) ball.undo();
+        else if (e.shiftKey) undoRedo(S.redo, S.undo, 'redo');
         else undoRedo(S.undo, S.redo, 'undo');
       }
       return;
@@ -1145,6 +1174,7 @@ export function openEditor(app, stem, info) {
       if (!e.repeat) markDown(e);
       return;
     }
+    if (ball.key(e)) return e.preventDefault();
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     const fn = {
       ' ': togglePlay, k: togglePlay,
@@ -1156,7 +1186,7 @@ export function openEditor(app, stem, info) {
       p: () => S.sel && playAnn(S.sel), r: () => setRegionsOnly(!S.regionsOnly), m: () => { vid.muted = !vid.muted; },
       t: () => { const b = S.sel && $('#inspector .add-tag'); if (b) pickLabel(b); else flash('Select an annotation to tag it'); },
       '\\': togglePanel, '=': () => tl.zoomBy(1.6), '+': () => tl.zoomBy(1.6), '-': () => tl.zoomBy(1 / 1.6), 0: () => tl.fit(),
-      d: () => setTool('point'),
+      d: () => setTool('point'), g: toggleBall,
       Escape: () => { if (S.step) selectStep(null); else if (S.tool) setTool(null); else if (S.sel) select(null); }, '?': () => $('#help-dlg').showModal(),
     }[k];
     if (!fn) return;

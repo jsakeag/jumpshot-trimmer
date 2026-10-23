@@ -463,3 +463,52 @@ dialog h2 { margin-top: 0; }
 .boxer .sel { position: absolute; border: 2px solid var(--maybe); background: color-mix(in srgb, var(--maybe) 15%, transparent); }
 .help { width: min(820px, calc(100vw - 32px)); }
 .keygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 24px; }
+
+/* ---------------------------------------------------------------- ball tracking (experimental) */
+
+.ballbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; flex: none; }
+.ballbar[hidden] { display: none; }
+.ballbar .seg button:disabled { color: var(--text); cursor: default; }
+.ballbar select { padding: 1px 4px; font-size: 12px; }
+.ballsvg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.screen.balling { box-shadow: inset 0 0 0 2px #4dd4ff; }
+.screen.balling .ballsvg { pointer-events: auto; cursor: crosshair; }
+.ballsvg g[data-kind] { cursor: move; }
+.ballsvg .court { stroke: rgba(255, 255, 255, .6); stroke-width: 1; }
+.ballsvg .netline { fill: none; stroke: rgba(255, 255, 255, .8); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.ballsvg .outline { fill: none; stroke: #4dd4ff; stroke-width: 1; stroke-dasharray: 3 3; }
+.ballsvg .corner circle { fill: rgba(77, 212, 255, .25); stroke: #4dd4ff; stroke-width: 2; }
+.ballsvg text { fill: #fff; font: 700 10px -apple-system, system-ui, sans-serif; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.ballsvg .hitarea { fill: transparent; stroke: none; }
+.ballsvg .bp :is(circle, rect):not(.hitarea) { fill: var(--c); stroke: rgba(0, 0, 0, .7); stroke-width: 1; opacity: .55; }
+.ballsvg .bp.bounce rect { fill: none; stroke: var(--c); stroke-width: 2; }
+.ballsvg .bp.now :is(circle, rect):not(.hitarea) { opacity: 1; }
+.ballsvg .bp.sel :is(circle, rect):not(.hitarea) { stroke: #fff; stroke-width: 2; opacity: 1; }
+.ballsvg .fit { fill: none; stroke: var(--c); stroke-width: 1.5; opacity: .85; pointer-events: none; }
+.ballsvg .raw { fill: none; stroke: var(--c); stroke-width: 1; stroke-dasharray: 2 3; opacity: .6; pointer-events: none; }
+.ballsvg .est { fill: none; stroke: #d8f04a; stroke-width: 2; pointer-events: none; }
+.ballsvg .shadow { fill: rgba(0, 0, 0, .55); pointer-events: none; }
+.ballsvg .drop { stroke: rgba(255, 255, 255, .5); stroke-dasharray: 2 2; pointer-events: none; }
+.court3d { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #0d1311; }
+.court3d[hidden] { display: none; }
+.court3d canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.court3d canvas:active { cursor: grabbing; }
+.c3-views { position: absolute; top: 10px; right: 10px; background: rgba(20, 20, 22, .8); }
+.c3-hint { position: absolute; bottom: 6px; right: 12px; margin: 0; font-size: 11px; color: var(--muted); pointer-events: none; }
+.c3-legend { position: absolute; top: 10px; left: 10px; max-width: min(460px, 60%); max-height: calc(100% - 40px); overflow-y: auto; margin: 0; padding: 8px 10px; list-style: none; font-size: 12px; background: rgba(20, 20, 22, .82); border-radius: 8px; }
+.c3-legend:empty { display: none; }
+.c3-legend > li { padding: 3px 4px; border-radius: 6px; cursor: pointer; opacity: .6; }
+.c3-legend > li.on { opacity: 1; }
+.c3-legend ul { list-style: none; margin: 2px 0 0 16px; padding: 0; }
+.c3-legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; background: var(--c); }
+.ballsvg .corner.sel circle:not(.dot) { stroke: #fff; fill: rgba(77, 212, 255, .5); }
+.ballsvg .corner .dot { fill: #fff; stroke: none; }
+.court-key { position: absolute; left: 10px; top: 10px; z-index: 3; width: 92px; padding: 6px; border-radius: 8px; background: rgba(20, 20, 22, .85); text-align: center; font-size: 10px; color: var(--muted); }
+.court-key[hidden] { display: none; }
+.court-key svg { display: block; width: 100%; }
+.court-key line { stroke: rgba(255, 255, 255, .45); stroke-width: .12; }
+.court-key line.net { stroke: rgba(255, 255, 255, .8); stroke-width: .2; stroke-dasharray: .4 .3; }
+.court-key circle { fill: var(--raised); stroke: var(--muted); stroke-width: .18; cursor: pointer; }
+.court-key circle:hover { stroke: #fff; }
+.court-key circle.placed { fill: #4dd4ff; stroke: #4dd4ff; }
+.court-key circle.pick { stroke: #ffd43b; stroke-width: .45; }

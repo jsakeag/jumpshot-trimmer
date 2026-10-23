@@ -80,6 +80,28 @@ that have any. Click a step to
 select it (a new one is selected too) and press ⌫ to delete it, again for the one before; or
 right-click one to remove it; `Esc` puts the tool down. They aren't burned into the export.
 
+### Ball flight in 3D (experimental)
+
+Mark where the ball went, separately from the strokes, and see it in 3D on the **3D β** tab.
+
+1. Press `G` (or **◎ Ball β**). The first time, place four or more known points on the court:
+   pick one on the small court map (near end at the bottom; left and right as seen from the
+   camera), then click where it is on the video. Points spread out (not all on one line) work
+   best. Once the drawn court lines sit on the real ones, press **Done** (↵). This finds where
+   the camera is and its lens.
+2. Step frame by frame and click the ball. `⇧`-click where it bounces, `⌥`-click where the
+   racket hits it. Each flight between a hit and a bounce needs at least 3 clicks (e.g. the
+   hit, one mid-flight, the bounce); more is better. `N` starts a new track, `[` `]` move
+   between tracks, `⌫` or right-click removes a point, `⌘Z` undoes.
+3. The fitted flight (gravity and air drag) is drawn back on the video, so you can see whether
+   it follows the ball. The **3D β** tab shows every track on the court with its speed off the
+   racket, peak height and net clearance; drag to turn it, or pick **Camera** to see it from
+   where you filmed.
+
+It's one camera, so depth comes from gravity and the bounces: expect speeds within about 5–10%.
+Spin isn't modeled, so heavy topspin reads a little fast and low. For slow-motion video, set
+**Slow-mo** to how many times slower it plays.
+
 ### All keys
 
 | Key | Does |
@@ -94,6 +116,7 @@ right-click one to remove it; `Esc` puts the tool down. They aren't burned into 
 | `P` | Play the selected annotation |
 | ⌫ | Delete it (or the newest mark); press again to delete the mark before |
 | `D` | Step tool; ⌥-click marks split-step feet |
+| `G` | Ball tool (experimental) |
 | `R` | Play only the listed annotations, on/off |
 | `M` | Mute |
 | ⌘Z / ⇧⌘Z | Undo / redo |
@@ -153,6 +176,7 @@ Everything for a video goes in `out/<video name>/`:
 | `<name>_review.mp4` | Every annotation, labeled (command line only) |
 | `filmstrip.jpg`, `wave.bin`, `media.json` | What the timeline draws |
 | `pose.npz`, `serve_pose.npz` | Cached pose data from plugins |
+| `ball.json` | Court points and ball tracks (experimental) |
 
 **Clear all videos** on the home page moves everything in `data/` and `out/` to the Trash.
 
@@ -161,5 +185,5 @@ Everything for a video goes in `out/<video name>/`:
 | Path | What it is |
 | --- | --- |
 | `trimmer/` | The core: annotations and exports (`project.py`), plugins (`plugins.py`) and their detectors (`serves.py`, `tennis.py`, `detect.py` with `pose.py`), timeline media (`media.py`), ffmpeg export (`export.py`) |
-| `server.py`, `web/` | The web app: API server and the editor page (`editor.js`, `timeline.js`) |
+| `server.py`, `web/` | The web app: API server and the editor page (`editor.js`, `timeline.js`; the ball tool in `ball.js`, its geometry and physics in `ballgeo.js`) |
 | `cli.py` | The command line |

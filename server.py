@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from trimmer import media, paths, plugins, project
+from trimmer import ball, media, paths, plugins, project
 from trimmer.export import frame_rate, probe
 
 WEB_DIR = paths.ROOT / "web"
@@ -295,6 +295,22 @@ def save_annotations(stem: str, body: Annotations):
     except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(400, f"Couldn't save: {e}")
     return {**status(stem, data), "added": added, "removed": removed}
+
+
+@app.get("/api/videos/{stem}/ball")
+def get_ball(stem: str):
+    """Court corners and ball tracks (experimental)."""
+    video_for(stem)
+    return ball.load(stem)
+
+
+@app.put("/api/videos/{stem}/ball")
+def save_ball(stem: str, body: dict):
+    video_for(stem)
+    try:
+        return ball.save(stem, body)
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, f"Couldn't save: {e}")
 
 
 @app.post("/api/videos/{stem}/plugins/{name}")
